@@ -126,14 +126,22 @@ impl Provider for RaccoonProvider {
                         .into_message(),
                 );
             }
+            // 头顺序逐字对齐官方 1.1.9：Content-Type / Accept → SDK 指纹 →
+            // Authorization → 会话身份段（含组织码，位置固定在
+            // x-client-channel 与 X-Stainless-Retry-Count 之间）。
+            let (session_id, turn_id) = conversation::resolve_ids(&req, &token, &org_code);
+            let org = if org_code.is_empty() {
+                None
+            } else {
+                Some(org_code.as_str())
+            };
             let mut headers: Vec<(String, String)> = vec![
                 ("Content-Type".to_string(), "application/json".to_string()),
                 ("Accept".to_string(), "application/json".to_string()),
-                ("Authorization".to_string(), format!("Bearer {token}")),
             ];
-            headers::append_org(&mut headers, &org_code)?;
-            headers.extend(client_identity::headers());
-            headers.extend(conversation::headers(&req, &token, &org_code));
+            headers.extend(client_identity::sdk_headers());
+            headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+            headers.extend(client_identity::rest_headers(&session_id, &turn_id, org));
             headers::append_external(&mut headers);
             let mut body = reasoning::normalize(&req.body, &req.wire_model)?;
             if req.stream {

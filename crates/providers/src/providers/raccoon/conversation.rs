@@ -1,108 +1,102 @@
-//! 会话标识按调用方、账号和首轮输入隔离；工具续轮与重试复用同一轮次。
+//! 会话标识对齐官方桌面客户端 1.1.9：`sess-0-<8hex>` 按账号与首轮输入
+//! 稳定派生，同一会话跨轮不变；轮次 ID 每请求生成 UUID v4（上游按它把
+//! 同一会话里的多次调用串成一个「回合」）。
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::collections::BTreeMap;
 
 use agent2api_provider_protocol::ChatRequest;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-const IDLE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-const MAX_SESSIONS: usize = 4096;
-const MAX_TURNS: usize = 16384;
+/// 会话派生的命名空间种子：与其它产品的同形会话 ID 隔离，改前缀等于
+/// 换一套派生结果，只允许在版本升级时动它。
+const SESSION_DERIVATION_PREFIX: &str = "raccoon-session-v1\0";
 
-struct Entry {
-    id: String,
-    touched: Instant,
+/// 解出对话身份：`(会话 ID, 轮次 ID)`。
+///
+/// 会话 ID 的取值顺序：入站已带官方形态（`sess-<十进制>-<8 位 hex>`）就
+/// 原样透传；否则按「账号 + 种子」派生。种子依次取入站会话标识的原始值、
+/// 请求体里的会话字段、首条用户消息，都没有时退到空串（按账号稳定）。
+pub(super) fn resolve_ids(req: &ChatRequest, token: &str, org: &str) -> (String, String) {
+    let explicit = session_id(&req.headers, &req.body);
+    let session = match explicit.as_deref().and_then(official_session) {
+        Some(value) => value,
+        None => {
+            let seed = explicit
+                .or_else(|| body_seed(&req.body))
+                .or_else(|| first_user_seed(&req.body))
+                .unwrap_or_default();
+            derived_session(
+                &identity_key(req, token, org),
+                &seed,
+            )
+        }
+    };
+    (session, crate::ids::uuid_v4())
 }
 
-#[derive(Default)]
-struct Ids {
-    sessions: HashMap<String, Entry>,
-    turns: HashMap<String, Entry>,
-}
-
-pub(super) fn headers(req: &ChatRequest, token: &str, org: &str) -> Vec<(String, String)> {
-    let (session_key, turn_key) = keys(req, token, org);
-    static IDS: OnceLock<Mutex<Ids>> = OnceLock::new();
-    let mut ids = IDS
-        .get_or_init(|| Mutex::new(Ids::default()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let now = Instant::now();
-    let session = resolve(&mut ids.sessions, session_key, MAX_SESSIONS, now);
-    let turn = resolve(&mut ids.turns, turn_key, MAX_TURNS, now);
-    vec![
-        ("X-RACCOON-Session-ID".to_string(), session),
-        ("X-RACCOON-Turn-ID".to_string(), turn),
-    ]
-}
-
-fn keys(req: &ChatRequest, token: &str, org: &str) -> (String, String) {
-    let mut session = Sha256::new();
-    field(&mut session, "provider", req.provider.as_bytes());
-    field(&mut session, "account", req.account.as_bytes());
-    field(&mut session, "org", org.as_bytes());
+/// 派生的账号维度：账号 id 优先，令牌里的用户身份次之，最后退到令牌本身
+/// —— 同一账号的会话必须落在同一个派生结果上。
+fn identity_key(req: &ChatRequest, token: &str, org: &str) -> String {
+    if !req.account.is_empty() {
+        return req.account.clone();
+    }
     let user = super::jwt::decode_jwt_claims(token)
         .map(|claims| super::jwt::extract_user_id(&claims))
         .filter(|user| !user.is_empty());
-    field(
-        &mut session,
-        "identity",
-        user.as_deref().unwrap_or(token).as_bytes(),
-    );
-    for name in ["authorization", "x-api-key", "x-client-id"] {
-        if let Some(value) = req.headers.get(name) {
-            field(&mut session, name, value.as_bytes());
-        }
+    match user {
+        Some(user) => format!("{org}|{user}"),
+        None => format!("{org}|{token}"),
     }
-    if let Some(user) = req.body.get("user") {
-        field(&mut session, "user", user.to_string().as_bytes());
-    }
-    let messages = req.body.get("messages").and_then(Value::as_array);
-    if let Some(explicit) = session_id(&req.headers, &req.body) {
-        field(&mut session, "session", explicit.as_bytes());
-    } else {
-        if let Some(agent) = req.headers.get("user-agent") {
-            field(&mut session, "client", agent.as_bytes());
-        }
-        if let Some(first) =
-            messages.and_then(|messages| messages.iter().find(|message| is_user(message)))
-        {
-            field(&mut session, "first-user", first.to_string().as_bytes());
-        } else {
-            field(&mut session, "request", req.body.to_string().as_bytes());
-        }
-    }
-    let session = format!("{:x}", session.finalize());
-    let mut turn = Sha256::new();
-    field(&mut turn, "session", session.as_bytes());
-    if let Some(explicit) = turn_id(&req.headers) {
-        field(&mut turn, "turn", explicit.as_bytes());
-    } else if let Some((messages, end)) = messages.and_then(|messages| {
-        messages
-            .iter()
-            .rposition(is_user)
-            .map(|end| (messages, end))
-    }) {
-        // 后续工具结果位于最后一条用户消息之后，不能改变这一轮的标识。
-        for message in &messages[..=end] {
-            field(&mut turn, "message", message.to_string().as_bytes());
-        }
-    } else {
-        field(&mut turn, "request", req.body.to_string().as_bytes());
-    }
-    (session, format!("{:x}", turn.finalize()))
 }
 
-fn field(hash: &mut Sha256, name: &str, value: &[u8]) {
-    hash.update((name.len() as u64).to_be_bytes());
-    hash.update(name.as_bytes());
-    hash.update((value.len() as u64).to_be_bytes());
-    hash.update(value);
+fn derived_session(identity: &str, seed: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(SESSION_DERIVATION_PREFIX.as_bytes());
+    hash.update(identity.as_bytes());
+    hash.update(b"\0");
+    hash.update(seed.as_bytes());
+    let digest = hash.finalize();
+    let suffix: String = digest[..4].iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("sess-0-{suffix}")
 }
 
+/// 官方形态：`sess-<十进制>-<8 位 hex>`，计数段与十六进制段都不可缺。
+fn official_session(value: &str) -> Option<String> {
+    let rest = value.strip_prefix("sess-")?;
+    let (counter, hex) = rest.split_once('-')?;
+    let counter_ok = !counter.is_empty() && counter.bytes().all(|byte| byte.is_ascii_digit());
+    let hex_ok = hex.len() == 8 && hex.bytes().all(|byte| byte.is_ascii_hexdigit());
+    (counter_ok && hex_ok).then(|| value.to_string())
+}
+
+/// 请求体里的会话字段（按官方客户端下发顺序取第一个命中的）。
+fn body_seed(body: &Value) -> Option<String> {
+    for pointer in [
+        "/conversation_id",
+        "/conversationId",
+        "/session_id",
+        "/sessionId",
+        "/prompt_cache_key",
+        "/promptCacheKey",
+    ] {
+        if let Some(value) = body.pointer(pointer).and_then(Value::as_str).and_then(identifier) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn first_user_seed(body: &Value) -> Option<String> {
+    let messages = body.get("messages")?.as_array()?;
+    messages
+        .iter()
+        .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .map(|message| message.to_string())
+}
+
+/// 入站会话标识的读取面：官方形态头优先，兼容调用方的常见会话头与
+/// Codex 元数据封装（这些值不合规时仅作派生种子）。
 fn session_id(headers: &BTreeMap<String, String>, body: &Value) -> Option<String> {
     for name in [
         "x-raccoon-session-id",
@@ -142,10 +136,7 @@ fn session_id(headers: &BTreeMap<String, String>, body: &Value) -> Option<String
     {
         return Some(value);
     }
-    let metadata = body
-        .pointer("/metadata/user_id")
-        .and_then(Value::as_str)?
-        .trim();
+    let metadata = body.pointer("/metadata/user_id").and_then(Value::as_str)?.trim();
     if metadata.starts_with('{') {
         let data: Value = serde_json::from_str(metadata).ok()?;
         return data
@@ -153,26 +144,10 @@ fn session_id(headers: &BTreeMap<String, String>, body: &Value) -> Option<String
             .and_then(Value::as_str)
             .and_then(identifier);
     }
-    let (device, session) = metadata
-        .strip_prefix("user_")?
-        .split_once("_account__session_")?;
+    let (device, session) = metadata.strip_prefix("user_")?.split_once("_account__session_")?;
     (device.len() == 64 && device.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .then(|| identifier(session))
         .flatten()
-}
-
-fn turn_id(headers: &BTreeMap<String, String>) -> Option<String> {
-    for name in [
-        "x-raccoon-turn-id",
-        "x-conversation-request-id",
-        "ah-trace-id",
-        "x-turn-id",
-    ] {
-        if let Some(value) = headers.get(name).and_then(|value| identifier(value)) {
-            return Some(value);
-        }
-    }
-    codex_metadata(headers, "turn_id")
 }
 
 fn codex_metadata(headers: &BTreeMap<String, String>, name: &str) -> Option<String> {
@@ -189,32 +164,57 @@ fn identifier(value: &str) -> Option<String> {
         .then(|| value.to_string())
 }
 
-fn is_user(message: &Value) -> bool {
-    message.get("role").and_then(Value::as_str) == Some("user")
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn resolve(entries: &mut HashMap<String, Entry>, key: String, cap: usize, now: Instant) -> String {
-    entries.retain(|_, entry| now.saturating_duration_since(entry.touched) < IDLE_TTL);
-    if let Some(entry) = entries.get_mut(&key) {
-        entry.touched = now;
-        return entry.id.clone();
+    #[test]
+    fn official_session_shapes_pass_through_verbatim() {
+        assert_eq!(
+            official_session("sess-0-0123abcd").as_deref(),
+            Some("sess-0-0123abcd")
+        );
+        assert_eq!(
+            official_session("sess-17-deadbeef").as_deref(),
+            Some("sess-17-deadbeef")
+        );
+        // 缺计数段 / hex 过长过短 / 非十六进制都不算官方形态。
+        assert_eq!(official_session("sess-0123abcd"), None);
+        assert_eq!(official_session("sess-0-0123abcde"), None);
+        assert_eq!(official_session("sess-0-0123abcg"), None);
+        assert_eq!(official_session("sess--0123abcd"), None);
     }
-    if entries.len() >= cap {
-        if let Some(oldest) = entries
-            .iter()
-            .min_by_key(|(_, entry)| entry.touched)
-            .map(|(key, _)| key.clone())
-        {
-            entries.remove(&oldest);
-        }
+
+    #[test]
+    fn derived_sessions_are_stable_per_identity_and_seed() {
+        let first = derived_session("account-1", "conv-a");
+        let second = derived_session("account-1", "conv-a");
+        let other_seed = derived_session("account-1", "conv-b");
+        let other_identity = derived_session("account-2", "conv-a");
+        assert_eq!(first, second);
+        assert_ne!(first, other_seed);
+        assert_ne!(first, other_identity);
     }
-    let id = crate::ids::uuid_v4();
-    entries.insert(
-        key,
-        Entry {
-            id: id.clone(),
-            touched: now,
-        },
-    );
-    id
+
+    #[test]
+    fn derived_sessions_use_the_official_shape() {
+        let value = derived_session("account-1", "conv-a");
+        assert!(value.starts_with("sess-0-"));
+        let hex = value.trim_start_matches("sess-0-");
+        assert_eq!(hex.len(), 8);
+        assert!(hex.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(official_session(&value).as_deref(), Some(value.as_str()));
+    }
+
+    #[test]
+    fn turn_ids_are_fresh_uuid_v4_per_request() {
+        let first = crate::ids::uuid_v4();
+        let second = crate::ids::uuid_v4();
+        assert_ne!(first, second);
+        let parts: Vec<&str> = first.split('-').collect();
+        assert_eq!(parts.iter().map(|part| part.len()).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12]);
+        assert!(first.chars().all(|ch| ch == '-' || ch.is_ascii_hexdigit()));
+        assert_eq!(&first[14..15], "4");
+        assert!(matches!(&first[19..20], "8" | "9" | "a" | "b"));
+    }
 }
