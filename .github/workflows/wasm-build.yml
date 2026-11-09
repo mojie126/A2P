@@ -1,9 +1,6 @@
 name: release-wasm
 
 on:
-  push:
-    tags:
-      - 'wasm-*-v*'
   workflow_dispatch:
     inputs:
       provider:

@@ -23,9 +23,6 @@ name: release
 # 触发本仓库的任何编译。
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       version:
