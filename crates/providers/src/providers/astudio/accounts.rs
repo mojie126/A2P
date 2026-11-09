@@ -454,13 +454,6 @@ fn paste_credential(
     })
 }
 
-/// 从一份凭据构造 secret（登录流程与手动添加共用）。
-pub fn secret_of(credentials: &Credentials) -> Value {
-    let mut secret = json!({});
-    credentials.write_into(&mut secret);
-    secret
-}
-
 fn account_of(credentials: Credentials, remark: &str) -> proto::NormalizedAccount {
     let mut secret = json!({});
     let mut credentials = credentials;

@@ -27,19 +27,6 @@ pub(super) fn js_truthy(value: &Value) -> bool {
     }
 }
 
-/// JS `Number(x) || 0`：非数字/NaN/0/缺失都得到 0
-pub(super) fn number_or_zero(value: Option<&Value>) -> f64 {
-    let number = match value {
-        Some(Value::Number(number)) => number.as_f64(),
-        Some(Value::String(text)) => text.trim().parse::<f64>().ok(),
-        _ => None,
-    };
-    match number {
-        Some(number) if number.is_finite() => number,
-        _ => 0.0,
-    }
-}
-
 /// JS `toInt(value)`：`Math.floor(Number(value))`，NaN → null
 pub(super) fn to_int(value: &Value) -> Option<i64> {
     let number = match value {
@@ -51,29 +38,6 @@ pub(super) fn to_int(value: &Value) -> Option<i64> {
         Some(number) if number.is_finite() => Some(number.floor() as i64),
         _ => None,
     }
-}
-
-/// 解析时间字段为毫秒时间戳（对照 Node 版 `parseTime` 的**原始返回值**）。
-///
-/// 语义逐条对齐：
-///   - 缺失 / null / 空串 → 0（不是 None）
-///   - 纯数字字符串（`/^\d+$/`）→ 数字本身（上游有时把时间戳给成字符串）
-///   - 其余交给 `new Date(x).getTime()`；解析不出 → 0
-///
-/// ── 时区语义必须逐字对齐（实测踩过）────────────────────────
-/// JS 的 `new Date(str)` 对**无时区**的格式分两类，差 8 小时（东八区实测）：
-///   `"2026-09-30"`（仅日期）      → **UTC** 零点（ECMAScript 规范规定）
-///   `"2026-09-30 23:59:59"`       → **本地时区**（实现相关的宽松解析）
-///   `"2026-09-30T23:59:59"`       → **本地时区**
-/// 上游的 `CycleEndTime` / `CycleStartTime` 正是 `"YYYY-MM-DD HH:MM:SS"` 形态，
-/// 若在这里按 UTC 解析，`refreshAt` 会整体偏 8 小时，前端显示的「额度刷新时间」
-/// 就与 Node 版对不上。因此这里对「无时区的日期时间」用 `Local` 解析，
-/// 「仅日期」用 UTC。
-///
-/// 返回 i64 而不是 Option：调用方需要的正是「0 为失败哨兵」这件事，
-/// 好让 `|| 0` / `|| null` 这些 JS 假值判断在 Rust 侧一目了然。
-pub(super) fn parse_time(value: Option<&Value>) -> i64 {
-    time_or_null(value).unwrap_or(0)
 }
 
 /// `parseTime(x) || null` 的等价物：解析不出（得到 0）时给 None。
@@ -104,9 +68,19 @@ pub(super) fn time_or_null(value: Option<&Value>) -> Option<i64> {
     parsed.filter(|value| *value != 0)
 }
 
-/// 日期文本 → 毫秒时间戳，时区语义与 JS 的 `new Date(str)` 对齐（见 `parse_time`）。
+/// 日期文本 → 毫秒时间戳，时区语义与 JS 的 `new Date(str)` 对齐。
 ///
 /// 只覆盖上游真会给到的几种形态；认不出的一律 None（JS 会得到 NaN → 0）。
+///
+/// ── 时区语义必须逐字对齐（实测踩过）────────────────────────
+/// JS 的 `new Date(str)` 对**无时区**的格式分两类，差 8 小时（东八区实测）：
+///   `"2026-09-30"`（仅日期）      → **UTC** 零点（ECMAScript 规范规定）
+///   `"2026-09-30 23:59:59"`       → **本地时区**（实现相关的宽松解析）
+///   `"2026-09-30T23:59:59"`       → **本地时区**
+/// 上游的 `CycleEndTime` / `CycleStartTime` 正是 `"YYYY-MM-DD HH:MM:SS"` 形态，
+/// 若在这里按 UTC 解析，`refreshAt` 会整体偏 8 小时，前端显示的「额度刷新时间」
+/// 就与 Node 版对不上。因此这里对「无时区的日期时间」用 `Local` 解析，
+/// 「仅日期」用 UTC。
 fn parse_date_text(text: &str) -> Option<i64> {
     use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
@@ -131,11 +105,6 @@ fn parse_date_text(text: &str) -> Option<i64> {
         .single()
         .map(|value| value.timestamp_millis())
         .or_else(|| Some(Utc.from_utc_datetime(&naive).timestamp_millis()))
-}
-
-/// 时间戳 → JSON（None → null；整数形态）
-pub(super) fn timestamp_json(value: Option<i64>) -> Value {
-    value.map(Value::from).unwrap_or(Value::Null)
 }
 
 /// JS `String(Math.floor(n))` 的近似：整数输出整数形态，
