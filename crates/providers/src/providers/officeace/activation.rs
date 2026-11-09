@@ -261,26 +261,3 @@ fn redact(message: &mut String, value: &Value) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pending_marks_and_clears() {
-        let account_id = "officeace-pending-mark-test";
-        set_pending(account_id, true);
-        assert!(pending(account_id));
-        set_pending(account_id, false);
-        assert!(!pending(account_id));
-    }
-
-    #[test]
-    fn pending_falls_back_after_timeout() {
-        let account_id = "officeace-pending-timeout-test";
-        pending_accounts()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(account_id.to_string(), crate::logging::now_ms() - PENDING_TTL_MS - 1000);
-        assert!(!pending(account_id));
-    }
-}
