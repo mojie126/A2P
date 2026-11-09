@@ -140,7 +140,7 @@ const REQUEST_TIMEOUT_MS: u64 = 15_000;
 /// 空 `plans`，所以这张表要跟着官方 changelog（zcode.z.ai/cn/changelog）
 /// 一起更新；排障时也可以先用 `ZCODE_APP_VERSION` 环境变量试几个版本，
 /// 不必改代码重发版。
-pub(super) const DEFAULT_APP_VERSION: &str = "3.18.0";
+pub(super) const DEFAULT_APP_VERSION: &str = "3.17.2";
 
 /// 探测与领取的路径（参考实现 `client.ts` 的常量）
 const PREVIEW_PATH: &str = "/api/v1/zcode-plan/billing/preview";
