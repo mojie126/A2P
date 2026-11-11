@@ -96,7 +96,8 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
           state="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)"
           if [[ "$state" == "true" ]]; then
-            gh release delete "$TAG" --yes --cleanup-tag
+            gh release delete "$TAG" --yes
+            gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$TAG" 2>/dev/null || true
           elif [[ -n "$state" ]]; then
             TAG="$TAG-r${{ github.run_number }}"
           fi
