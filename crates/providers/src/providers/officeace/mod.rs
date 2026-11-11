@@ -402,6 +402,7 @@ impl Provider for OfficeAceProvider {
         Box::pin(async move {
             match action {
                 "subscription.preview" => activation::preview(ctx, account).await,
+                "subscription.simulate-client" => activation::simulate_client(ctx, account).await,
                 "subscription.ensure" => activation::ensure(
                     ctx, account, payload.get("confirmAgreements").and_then(Value::as_bool) == Some(true),
                 ).await,

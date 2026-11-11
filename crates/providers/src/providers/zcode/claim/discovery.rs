@@ -215,10 +215,9 @@ pub async fn preview(
                 }
             })
         });
-        let needs_ownership = snapshot.plans.iter().any(|plan| {
-            !snapshot.owned.get(&plan.plan_id).is_some_and(|owned| owned.matches_activity(plan))
-        });
-        if needs_ownership && !jwt.trim().is_empty() {
+        // 账号名下套餐是领取事实的权威来源；即使候选清单为空也必须回读，
+        // 否则上游已下发而活动目录暂缺时会误报「没有套餐」
+        if !jwt.trim().is_empty() {
             match ownership::query(region, account, jwt, device_mid, proxy).await {
                 Ok(plans) => {
                     for plan in &snapshot.plans {
@@ -227,6 +226,24 @@ pub async fn preview(
                         {
                             snapshot.owned.insert(plan.plan_id.clone(), owned.clone());
                         }
+                    }
+                    // 活动目录为空但账号已领取时，用名下套餐构造可展示的计划，
+                    // 保留上游给出的状态与到期时间，事实不被目录失败抹掉
+                    for owned in plans {
+                        if snapshot.plans.iter().any(|plan| plan.plan_id == owned.plan_id) {
+                            continue;
+                        }
+                        snapshot.plans.push(ClaimablePlan {
+                            plan_id: owned.plan_id.clone(),
+                            name: owned.name.clone(),
+                            description: String::new(),
+                            priority: 0,
+                            starts_at: owned.starts_at,
+                            ends_at: owned.ends_at,
+                            entitlements: owned.entitlements.clone(),
+                            marketing_campaign_ids: Vec::new(),
+                        });
+                        snapshot.owned.insert(owned.plan_id.clone(), owned);
                     }
                 }
                 Err(error) => snapshot.ownership_error = Some(error.message),

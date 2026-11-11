@@ -95,6 +95,127 @@ pub async fn ensure(ctx: &PluginCtx, account_id: &str, consent: bool) -> Result<
     }).await
 }
 
+/// 只读模拟已知官方客户端的订阅状态。
+///
+/// 不生成登录态、不切换设备指纹、不提交订单或协议：网页登录拿到的控制面
+/// 凭据本来就是官方客户端同一条云端链路的合法授权，因此能复现客户端会看到的
+/// 订阅快照、资源清单与续费状态；不能保证客户端端独有的 TLS / CloudWAF
+/// 会话，遇到这些拒绝时原样说明，不伪装成功。
+pub async fn simulate_client(
+    ctx: &PluginCtx,
+    account_id: &str,
+) -> Result<Value, String> {
+    if account_id.is_empty() {
+        return Err(GatewayError::with_status(400, "模拟客户端状态缺少账号").into_control_message());
+    }
+    let record = crate::store::record(ctx, super::ID, account_id).await
+        .map_err(GatewayError::into_control_message)?;
+    let mut credential = credentials::from_record(Some(&record))
+        .map_err(GatewayError::into_control_message)?;
+    let subscription = control::subscription_of(ctx, &mut credential).await?;
+    let bonus = subscription::bonuses_of(&subscription);
+    let resources = trial::resources(ctx, &mut credential).await.ok();
+    let renewal = resources.as_deref().and_then(trial::no_auto_renew).map(|safe| !safe);
+    let trial = resources.as_deref().and_then(|rows| rows.iter().find(|row| {
+        row.get("sku_code").and_then(Value::as_str) == Some(trial::SKU)
+            && row.get("status").and_then(Value::as_str) == Some("SUBSCRIBED")
+    }));
+    Ok(json!({
+        "simulation": "official-control-plane",
+        "readOnly": true,
+        "clientInstalled": false,
+        "clientSpecificTlsAvailable": false,
+        "subscribeStatus": subscription.get("subscribe_status"),
+        "subscription": safe_subscription(&subscription),
+        "bonuses": bonus.iter().map(|item| json!({
+            "id": item.activity_id, "name": item.name, "total": item.total,
+            "remaining": item.remaining(), "expiresAt": item.expires_at,
+        })).collect::<Vec<_>>(),
+        "trial": trial.and_then(safe_trial),
+        "autoRenew": renewal,
+        "limitations": [
+            "只能读取控制面公开快照，不模拟客户端本地数据库或登录态",
+            "CloudWAF 若按 TLS 指纹或挑战拦截，本模拟不会绕过",
+            "不会开通套餐、确认协议或修改自动续费",
+        ],
+    }))
+}
+
+/// 订阅快照的固定公开字段；上游原始对象可能带模型密钥等内部字段，不能透传。
+fn safe_subscription(subscription: &Value) -> Value {
+    let summary = subscription::summarize(subscription);
+    let wallets = safe_rows(
+        summary.get("wallets"),
+        &["type", "displayName", "balance"],
+    );
+    let plan = safe_object(
+        summary.get("subscription"),
+        &["planName", "status", "expireAt", "remainQuota", "totalQuota"],
+    );
+    let searches = safe_object(
+        plan.get("searches"),
+        &["remaining", "total"],
+    );
+    let credits = safe_rows(
+        summary.get("credits"),
+        &["name", "total", "used", "remain", "unit", "expireAt"],
+    );
+    let mut value = json!({
+        "available": summary.get("available"),
+        "unit": summary.get("unit"),
+        "wallets": wallets,
+        "subscription": {
+            "planName": plan.get("planName"),
+            "status": plan.get("status"),
+            "expireAt": plan.get("expireAt"),
+            "remainQuota": plan.get("remainQuota"),
+            "totalQuota": plan.get("totalQuota"),
+            "searches": searches,
+        },
+    });
+    if !credits.is_empty() {
+        value["credits"] = json!(credits);
+    }
+    value
+}
+
+/// 体验套餐只保留公开标识、状态和到期读数，不返回任何资源原始字段。
+fn safe_trial(row: &Value) -> Option<Value> {
+    let mut value = serde_json::Map::new();
+    for key in ["sku_code", "status", "expired_time"] {
+        if let Some(item) = row.get(key) {
+            if !item.is_null() {
+                value.insert(key.to_string(), item.clone());
+            }
+        }
+    }
+    if value.is_empty() {
+        None
+    } else {
+        Some(Value::Object(value))
+    }
+}
+
+fn safe_object(value: Option<&Value>, keys: &[&str]) -> Value {
+    let Some(source) = value.and_then(Value::as_object) else {
+        return Value::Null;
+    };
+    let mut target = serde_json::Map::new();
+    for key in keys {
+        if let Some(item) = source.get(*key) {
+            target.insert((*key).to_string(), item.clone());
+        }
+    }
+    Value::Object(target)
+}
+
+fn safe_rows(value: Option<&Value>, keys: &[&str]) -> Vec<Value> {
+    value
+        .and_then(Value::as_array)
+        .map(|rows| rows.iter().map(|row| safe_object(Some(row), keys)).collect())
+        .unwrap_or_default()
+}
+
 async fn ensure_inner(
     ctx: &PluginCtx,
     account_id: &str,
@@ -258,6 +379,46 @@ fn redact(message: &mut String, value: &Value) {
         Value::Array(values) => for value in values { redact(message, value); },
         Value::String(value) if value.len() >= 16 => *message = message.replace(value, "[已隐藏]"),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::safe_subscription;
+
+    #[test]
+    fn simulation_summary_never_exposes_upstream_secrets() {
+        let subscription = json!({
+            "subscribe_status": "SUBSCRIBED",
+            "skus": [{
+                "sku_name": "个人体验版",
+                "expired_time": 1794445200000i64,
+                "model_app_key": "key-should-not-leak",
+                "model_app_secret": "secret-should-not-leak",
+                "quotas": [{
+                    "sku_attr_code": "officeace_points",
+                    "sku_value": "500",
+                    "current_value": "500",
+                    "expired_time": 1794445200000i64
+                }]
+            }],
+            "bonus_skus": [{
+                "activity_name": "新人奖励",
+                "points": "4000",
+                "current_value": "4000",
+                "expired_time": 1794445200000i64,
+                "nested_secret": "bonus-secret"
+            }]
+        });
+        let safe = safe_subscription(&subscription);
+        let text = safe.to_string();
+        assert!(!text.contains("model_app"));
+        assert!(!text.contains("secret-should-not-leak"));
+        assert!(!text.contains("nested_secret"));
+        assert_eq!(safe["subscription"]["planName"], "个人体验版");
+        assert_eq!(safe["subscription"]["status"], "SUBSCRIBED");
     }
 }
 
