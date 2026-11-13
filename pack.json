@@ -215,6 +215,12 @@
       "label": "QuWork",
       "order": 33,
       "default_enabled": true
+    },
+    {
+      "id": "dumate",
+      "label": "百度搭子",
+      "order": 34,
+      "default_enabled": true
     }
   ],
   "icons": "assets",

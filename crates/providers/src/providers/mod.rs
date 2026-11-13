@@ -66,6 +66,8 @@ pub mod kiro;
 pub mod astudio;
 #[cfg(feature = "quwork")]
 pub mod quwork;
+#[cfg(feature = "dumate")]
+pub mod dumate;
 
 use agent2api_provider_sdk::BoxProvider;
 
@@ -190,6 +192,9 @@ pub fn registry() -> Vec<BoxProvider> {
 
     #[cfg(feature = "quwork")]
     list.push(Box::new(quwork::QuWorkProvider));
+
+    #[cfg(feature = "dumate")]
+    list.push(Box::new(dumate::DumateProvider));
 
     list
 }
