@@ -121,6 +121,10 @@ pub async fn query(ctx: &PluginCtx, account: &str) -> Result<Value, String> {
     });
     if let Some(balance) = left {
         report["balance"] = json!(balance);
+        // 组头「可用合计」与账号行「余额」列的取数字段是顶层的 totalLeft /
+        // available（见 ui-shared/usage-readings.ts），只写 balance 界面读不到。
+        report["totalLeft"] = json!(balance);
+        report["available"] = json!(balance);
     }
     if let Some(used) = used {
         report["used"] = json!(used);

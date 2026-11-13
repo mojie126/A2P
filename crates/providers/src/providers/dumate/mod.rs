@@ -21,6 +21,7 @@ pub mod accounts;
 pub mod checkin;
 pub mod client;
 pub mod endpoints;
+pub mod login;
 pub mod models;
 pub mod usage;
 
@@ -134,6 +135,67 @@ impl Provider for DumateProvider {
 
     fn account_identity(&self, secret: &Value) -> Result<String, String> {
         Ok(accounts::identity(secret))
+    }
+
+    /// 动态登录方式（网关「添加账号」弹窗按它渲染）。
+    fn admin_action<'a>(
+        &'a self,
+        _ctx: &'a PluginCtx,
+        _account: &'a str,
+        action: &'a str,
+        _payload: &'a Value,
+    ) -> SendFuture<'a, Value> {
+        Box::pin(async move {
+            match action {
+                "auth.methods" => Ok(login::login_methods()),
+                other => Err(agent2api_provider_sdk::unsupported(format!(
+                    "百度搭子不支持管理动作「{other}」"
+                ))),
+            }
+        })
+    }
+
+    // ── 登录（受控浏览器自动抓取 + 粘贴 Cookie 两条）────────────
+
+    fn login_start<'a>(
+        &'a self,
+        ctx: &'a PluginCtx,
+        method: &'a str,
+        payload: &'a Value,
+    ) -> SendFuture<'a, proto::LoginStart> {
+        Box::pin(async move {
+            if method != "browser" {
+                return Err("百度搭子的登录请用「打开浏览器登录（自动抓取 Cookie）」方式".into());
+            }
+            let index = payload.get("methodIndex").and_then(Value::as_u64);
+            match index {
+                // 1 = 受控浏览器自动抓取；2 = 粘贴 Cookie，不走登录流程
+                Some(1) => {
+                    let proxy = payload
+                        .get("proxy")
+                        .filter(|value| !value.is_null())
+                        .and_then(|value| serde_json::from_value(value.clone()).ok());
+                    login::start_browser_flow(proxy, ctx.env.proxy.clone()).await
+                }
+                Some(2) => Err("请直接填写网页 Cookie 并提交，无需发起登录流程".to_string()),
+                _ => Err("这条登录方式不存在，请关闭弹窗后重新打开".to_string()),
+            }
+        })
+    }
+
+    fn login_poll<'a>(
+        &'a self,
+        ctx: &'a PluginCtx,
+        flow: &'a str,
+    ) -> SendFuture<'a, proto::LoginPoll> {
+        Box::pin(async move { Ok(login::poll(ctx, flow).await) })
+    }
+
+    fn login_cancel<'a>(&'a self, _ctx: &'a PluginCtx, flow: &'a str) -> SendFuture<'a, ()> {
+        Box::pin(async move {
+            login::cancel(flow);
+            Ok(())
+        })
     }
 
     // ── 目录 ──────────────────────────────────────────────────
