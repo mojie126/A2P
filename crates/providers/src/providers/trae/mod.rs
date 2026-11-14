@@ -34,6 +34,7 @@
 //! 子模块清单（一眼看清谁管什么）：
 //! ```text
 //!   adapter       Provider 实现：分错误 / 取令牌 / 刷目录 / 账号面 / 登录入口
+//!   billing       逐轮账单缓存（get_session_usage，请求日志的缓存命中）
 //!   accounts      账号归一化、公开视图、稳定身份
 //!   forward       有状态转发（首包门 + 翻帧 + 冷却标记）
 //!   session       一轮网页登录的编排（绑端口 → 换证 → 读身份）
@@ -59,6 +60,7 @@
 
 pub(crate) mod accounts;
 pub mod adapter;
+pub(crate) mod billing;
 pub(crate) mod callback_server;
 pub(crate) mod catalog;
 pub(crate) mod checkin;

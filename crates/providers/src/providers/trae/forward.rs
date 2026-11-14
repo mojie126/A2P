@@ -58,6 +58,7 @@ use agent2api_provider_protocol::WireProxy as ResolvedProxy;
 use agent2api_provider_sdk::{ConversationSink, PluginCtx};
 
 use super::catalog::Route;
+use super::billing::{self, BillQuery};
 use super::credentials::Credential;
 use super::errors::ErrorKind;
 use super::headers::solo_headers;
@@ -397,6 +398,71 @@ fn request_id() -> String {
     )
 }
 
+/// 一批帧的统一出口：先把逐轮账单的缓存并进收尾帧（usage 挂在收尾帧上，
+/// 插件侧的 report_usage 是空实现，网关只认帧里的 usage，所以必须在发送前
+/// 并进去），再旁读与渲染下发。返回 false 表示客户端已断开。
+async fn deliver(
+    frames: impl IntoIterator<Item = Frame>,
+    requested: &str,
+    telemetry: &RequestTelemetry,
+    bill: &BillQuery,
+    bill_done: &mut bool,
+    usage_seen: &mut Option<Value>,
+    sink: &mut ConversationSink<'_>,
+) -> bool {
+    for mut frame in frames {
+        if !*bill_done {
+            if let Frame::Chunk(chunk) = &mut frame {
+                if chunk.get("usage").is_some() {
+                    *bill_done = true;
+                    if let Some(usage) = chunk.get_mut("usage") {
+                        enrich_usage_with_bill(bill, usage).await;
+                    }
+                }
+            }
+        }
+        note(&frame, telemetry, usage_seen);
+        if let Some(text) = render(&frame, requested) {
+            if sink.send(text.as_bytes()).await.is_err() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// 收尾帧的逐轮账单缓存补全。SSE 的缓存 0 不能证明未命中（真机实测
+/// SSE 两轮全 0、账单 cache_read_token=25344），权威值在账单的
+/// `extra_info` 里；查到并进 usage，查不到保持原样，不编数字。
+/// 上游 SSE 自己已报正缓存时跳过查询：报了就没有再查的必要。
+async fn enrich_usage_with_bill(bill: &BillQuery, usage: &mut Value) {
+    if !usage.is_object() {
+        return;
+    }
+    let seen = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(Value::as_i64)
+        })
+        .unwrap_or(0);
+    if seen > 0 {
+        return;
+    }
+    let cache = bill.fetch_cache().await;
+    if !cache.is_empty() && billing::merge_into_usage(usage, &cache) {
+        logging::verbose(
+            "[Trae]",
+            &format!(
+                "账单缓存补全：cache_read={:?} cache_write={:?}",
+                cache.read, cache.write
+            ),
+        );
+    }
+}
+
 /// 用一条凭据打一次上游并产出对客户端可见的 outcome（有状态路径的入口）。
 /// 生产入口：打默认的上游主机。
 pub(crate) async fn forward(
@@ -511,8 +577,9 @@ pub(crate) async fn forward_at(
             match prepared {
                 Ok((prefetched, source, mut solo, scanner)) => {
                     models::remember_route(&credential, wire_model, &route);
+                    let bill = BillQuery::new(base, &session, &credential, effective.as_ref());
                     if !stream {
-                        let completion = match drive_aggregate(
+                        let mut completion = match drive_aggregate(
                             source, &mut solo, scanner, prefetched, requested, &telemetry,
                         )
                         .await
@@ -520,6 +587,9 @@ pub(crate) async fn forward_at(
                             Ok(completion) => completion,
                             Err(error) => return Err(final_error(error, &limit).await),
                         };
+                        if let Some(usage) = completion.get_mut("usage") {
+                            enrich_usage_with_bill(&bill, usage).await;
+                        }
                         let payload = serde_json::to_vec(&completion).map_err(|error| {
                             GatewayError::with_status(
                                 500,
@@ -550,7 +620,7 @@ pub(crate) async fn forward_at(
                     .await
                     .map_err(|error| GatewayError::with_status(499, error))?;
                     drive_stream(
-                        source, &mut solo, scanner, prefetched, requested, &telemetry, sink,
+                        source, &mut solo, scanner, prefetched, requested, &telemetry, sink, &bill,
                     )
                     .await;
                     return Ok(());
@@ -599,15 +669,16 @@ async fn drive_stream(
     requested: &str,
     telemetry: &RequestTelemetry,
     sink: &mut ConversationSink<'_>,
+    bill: &BillQuery,
 ) {
     let mut usage_seen: Option<Value> = None;
-    for frame in prefetched {
-        note(&frame, telemetry, &mut usage_seen);
-        if let Some(text) = render(&frame, requested) {
-            if sink.send(text.as_bytes()).await.is_err() {
-                return;
-            }
-        }
+    let mut bill_done = false;
+    if !deliver(
+        prefetched, requested, telemetry, bill, &mut bill_done, &mut usage_seen, sink,
+    )
+    .await
+    {
+        return;
     }
     if solo.completed() {
         return;
@@ -616,22 +687,32 @@ async fn drive_stream(
         match item {
             Err(error) => {
                 if let Some(line) = scanner.finish() {
-                    for frame in solo.feed_line(&line) {
-                        note(&frame, telemetry, &mut usage_seen);
-                        if let Some(text) = render(&frame, requested) {
-                            if sink.send(text.as_bytes()).await.is_err() {
-                                return;
-                            }
-                        }
+                    if !deliver(
+                        solo.feed_line(&line),
+                        requested,
+                        telemetry,
+                        bill,
+                        &mut bill_done,
+                        &mut usage_seen,
+                        sink,
+                    )
+                    .await
+                    {
+                        return;
                     }
                 }
-                for frame in solo.flush_pending() {
-                    note(&frame, telemetry, &mut usage_seen);
-                    if let Some(text) = render(&frame, requested) {
-                        if sink.send(text.as_bytes()).await.is_err() {
-                            return;
-                        }
-                    }
+                if !deliver(
+                    solo.flush_pending(),
+                    requested,
+                    telemetry,
+                    bill,
+                    &mut bill_done,
+                    &mut usage_seen,
+                    sink,
+                )
+                .await
+                {
+                    return;
                 }
                 let message = format!("Trae 上游流中断: {error}");
                 telemetry.note_error(&message);
@@ -642,13 +723,18 @@ async fn drive_stream(
             }
             Ok(chunk) => {
                 for line in scanner.push(&chunk) {
-                    for frame in solo.feed_line(&line) {
-                        note(&frame, telemetry, &mut usage_seen);
-                        if let Some(text) = render(&frame, requested) {
-                            if sink.send(text.as_bytes()).await.is_err() {
-                                return;
-                            }
-                        }
+                    if !deliver(
+                        solo.feed_line(&line),
+                        requested,
+                        telemetry,
+                        bill,
+                        &mut bill_done,
+                        &mut usage_seen,
+                        sink,
+                    )
+                    .await
+                    {
+                        return;
                     }
                     if solo.completed() {
                         return;
@@ -658,23 +744,33 @@ async fn drive_stream(
         }
     }
     if let Some(line) = scanner.finish() {
-        for frame in solo.feed_line(&line) {
-            note(&frame, telemetry, &mut usage_seen);
-            if let Some(text) = render(&frame, requested) {
-                if sink.send(text.as_bytes()).await.is_err() {
-                    return;
-                }
-            }
+        if !deliver(
+            solo.feed_line(&line),
+            requested,
+            telemetry,
+            bill,
+            &mut bill_done,
+            &mut usage_seen,
+            sink,
+        )
+        .await
+        {
+            return;
         }
     }
     // 尾事件可能就是完成通知，必须先解析，再决定是否报告截断。
-    for frame in solo.flush_pending() {
-        note(&frame, telemetry, &mut usage_seen);
-        if let Some(text) = render(&frame, requested) {
-            if sink.send(text.as_bytes()).await.is_err() {
-                return;
-            }
-        }
+    if !deliver(
+        solo.flush_pending(),
+        requested,
+        telemetry,
+        bill,
+        &mut bill_done,
+        &mut usage_seen,
+        sink,
+    )
+    .await
+    {
+        return;
     }
     if require_terminal() && solo.missing_terminal() {
         telemetry.note_error(MISSING_TERMINAL);
@@ -685,13 +781,18 @@ async fn drive_stream(
             return;
         }
     }
-    for frame in solo.finish() {
-        note(&frame, telemetry, &mut usage_seen);
-        if let Some(text) = render(&frame, requested) {
-            if sink.send(text.as_bytes()).await.is_err() {
-                return;
-            }
-        }
+    if !deliver(
+        solo.finish(),
+        requested,
+        telemetry,
+        bill,
+        &mut bill_done,
+        &mut usage_seen,
+        sink,
+    )
+    .await
+    {
+        return;
     }
     let _ = &usage_seen;
 }

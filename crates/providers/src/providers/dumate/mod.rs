@@ -272,6 +272,9 @@ impl Provider for DumateProvider {
 
     /// 构造一次无状态请求。`qianfan/` 前缀的模型走千帆原生端点，其余走
     /// 应用链路；两条链路的模型名空间不同，不能混发。
+    /// 流式请求必须带 `stream_options.include_usage`（对齐参考实现
+    /// CLAUDE.md 实测记录：云端网关只在该字段存在时才补流尾 usage 帧，
+    /// 漏注入的症状是请求全部 200 而 token 全记 0）。
     fn build_chat<'a>(
         &'a self,
         ctx: &'a PluginCtx,
@@ -316,17 +319,7 @@ impl Provider for DumateProvider {
                     "openclaw".to_string(),
                 ));
             }
-            let mut body = req.body.clone();
-            if body.is_object() {
-                body["model"] = Value::String(if qianfan {
-                    req.wire_model
-                        .strip_prefix(QIANFAN_PREFIX)
-                        .unwrap_or(&req.wire_model)
-                        .to_string()
-                } else {
-                    req.wire_model.clone()
-                });
-            }
+            let body = prepare_body(req.body.clone(), &req.wire_model, qianfan);
             Ok(ChatPlan::chat(
                 format!("{}{}", endpoints::GATEWAY_BASE, path),
                 headers,
@@ -396,6 +389,33 @@ impl Provider for DumateProvider {
     }
 }
 
+/// 出站请求体：改写模型名，并在流式时补 `stream_options.include_usage`。
+///
+/// 客户端已带 `stream_options` 时保留其余键、只把 `include_usage` 置真
+/// （覆盖整个对象会悄悄丢掉用户显式设过的东西，与 ModelScope 同一口径）；
+/// 非流式不带该字段，上游在响应体里直接给 usage。
+fn prepare_body(mut body: Value, wire_model: &str, qianfan: bool) -> Value {
+    let Some(object) = body.as_object_mut() else {
+        return body;
+    };
+    let model = if qianfan {
+        wire_model.strip_prefix(QIANFAN_PREFIX).unwrap_or(wire_model)
+    } else {
+        wire_model
+    };
+    object.insert("model".into(), Value::String(model.to_string()));
+    if object.get("stream").and_then(Value::as_bool) == Some(true) {
+        let options = object
+            .entry("stream_options".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !options.is_object() {
+            *options = Value::Object(serde_json::Map::new());
+        }
+        options["include_usage"] = Value::Bool(true);
+    }
+    body
+}
+
 /// 下一个北京零点（毫秒时间戳），余额耗尽档的冷却终点。
 fn next_beijing_midnight() -> i64 {
     use chrono::{Duration, FixedOffset};
@@ -411,5 +431,36 @@ fn next_beijing_midnight() -> i64 {
         .earliest()
         .map(|time| time.timestamp_millis())
         .unwrap_or_else(|| local.timestamp_millis() + Duration::hours(1).num_milliseconds())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn streaming_body_injects_include_usage() {
+        let body = prepare_body(json!({ "model": "kimi-k31", "stream": true }), "kimi-k31", false);
+        assert_eq!(body["model"], "kimi-k31");
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn streaming_body_keeps_client_stream_options() {
+        let body = prepare_body(
+            json!({ "stream": true, "stream_options": { "foo": 1 } }),
+            "kimi-k31",
+            false,
+        );
+        assert_eq!(body["stream_options"]["foo"], 1);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn non_stream_body_has_no_stream_options() {
+        let body = prepare_body(json!({ "stream": false }), "qianfan/qwen3.5-35b-a3b", true);
+        assert_eq!(body["model"], "qwen3.5-35b-a3b");
+        assert!(body.get("stream_options").is_none());
+    }
 }
 

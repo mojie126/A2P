@@ -13,6 +13,7 @@
 - 修复：插件 Linux x86_64 构建与网关统一使用 `target-cpu=x86-64` 与通用 C/C++ 指令集参数，避免在不支持 AVX 的旧处理器上因 SIGILL 无法启动
 - 修复：小浣熊对话请求头对齐官方桌面客户端 1.1.9（Issue #542）：SDK 指纹与平台标识改声明值（Windows / x64 / `desktop-windows-x64`，不再探测宿主），客户端标识改发小写 `x-client-*` 且版本升至 v1.1.9，会话标识改为官方 `sess-0-<8hex>` 派生（同账号同会话稳定、官方形态透传），轮次 ID 每请求生成 UUID v4，补 `X-RACCOON-Title` 与 `X-RACCOON-Call-Kind`，头顺序逐字对齐官方，组织码仅组织账号发送
 - 修复：ZCode 活动目录为空时仍回读账号名下已领取套餐，已领取但目录暂缺的计划不再显示为空；名单内已有计划继续以活动目录的显示信息为准
+- 修复：百度搭子流式对话补 `stream_options.include_usage` 注入：上游只在带该字段时才回传流尾 usage 帧，此前请求全部 200 而 token 与缓存命中全记 0，报表按 token 聚合的图表看不到这家（对齐参考实现实测记录）
 
 ## 优化
 
@@ -21,6 +22,7 @@
 - 优化：上游死代码清理：`workbuddy/billing/tools.rs` 与 `astudio/accounts.rs` 中无调用方函数移除，时区语义实测结论并入 `parse_date_text` 文档，编译告警清零
 - 优化：移除插件 SDK 的 panic 钩子，保留 Rust 默认 panic 输出与网关 stderr 摘要能力
 - 优化：`dev-build` 增加可选缓存清理任务，Rust 缓存键随 x86-64 指令集基线版本切换
+- 优化：Trae 收尾帧发送前查逐轮账单（`get_session_usage`）补缓存命中计数：上游 SSE 的缓存恒为 0 不能证明未命中，权威值在账单 `extra_info`；账单键为请求体主动写的 `session_id`，整体预算封顶 12 秒，查不到保持原样不编数字
 
 ## 其它
 
