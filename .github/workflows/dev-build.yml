@@ -15,16 +15,49 @@ name: dev-build
 # licenses/），可在网关「提供商插件 → 安装插件包」直接安装，
 # 平台口径：Docker 部署只出 amd64 镜像，对应 x86_64-unknown-linux-gnu，
 # Windows 走 msvc 原生
+#
+# Linux x86_64 编译基线沿用网关仓库的 .cargo/config.toml 参数，
+# 禁止使用 target-cpu=native 与依赖 AVX 的编译选项
 
 on:
   workflow_dispatch:
-    # 版本号一律取 pack.json，触发时不需要填任何信息
+    inputs:
+      clean_cache:
+        description: 清理旧 Rust 缓存
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
 
 jobs:
+  cleanup:
+    name: 清理构建缓存
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: 清理旧 Rust 缓存
+        if: inputs.clean_cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ids="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select(.key | startswith("v0-rust-")) | .id')"
+          count=0
+          while IFS= read -r id; do
+            if [[ -n "$id" ]]; then
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/caches/$id" >/dev/null
+              count=$((count + 1))
+            fi
+          done <<< "$ids"
+          echo "已清理旧 Rust 缓存 $count 条"
+
   build:
+    needs:
+      - cleanup
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +75,8 @@ jobs:
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86-64-baseline-v1
 
       - uses: actions/setup-node@v7
         with:

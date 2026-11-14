@@ -1,0 +1,8 @@
+# Linux x86_64 与网关仓库保持同一指令集基线
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64"]
+
+# C/C++ 依赖不继承 Rust 的 target-cpu
+[env]
+CFLAGS_x86_64_unknown_linux_gnu = { value = "-march=x86-64 -mtune=generic", force = true }
+CXXFLAGS_x86_64_unknown_linux_gnu = { value = "-march=x86-64 -mtune=generic", force = true }

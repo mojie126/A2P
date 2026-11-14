@@ -36,10 +36,8 @@ repository = "https://github.com/ProvidersPlugin/Agent2Providers"
 homepage = "https://github.com/aimod-cc/Agent2API"
 
 [profile.release]
-# 与网关保持一致的硬约束：任何 panic 都会带走整个插件进程 —— 但**不会**
-# 带走网关，这正是插件架构的收益。用 unwind 而不是 abort 是为了让
-# `catch_unwind` 能在单个请求边界上兜住（见 crates/providers/src/lib.rs
-# 的 `guard` 辅助）。
+# 插件与网关隔离运行，panic 不会带走网关进程
+# 使用 unwind 保留运行时对 panic 的既有处理语义
 panic = "unwind"
 lto = true
 codegen-units = 1
