@@ -1,7 +1,8 @@
-//! CodeArts 的每日福利领取（`/v1/ops` delivery → claim → confirm）。
+//! CodeArts 的每日签到与福利领取（`/v1/ops` delivery → claim → confirm）。
 //!
-//! ── 这不是「签到」，形状差得很远 ────────────────────────────
-//! 别家的每日签到是「定点、无人值守、一次请求」。本家是**运营活动交付**：
+//! ── 签到奖励是运营活动交付 ─────────────────────────────────
+//! `USER_LOGIN` 与 `DAILY_CLAIM` 是每日奖励，`NEW_USER_REGISTER` 与 `REGISTER`
+//! 是一次性注册或报名奖励，本家统一按**运营活动交付**处理，
 //! 先读活动列表（delivery），挑出**该自动领的那几类**，逐个 claim，再 confirm，
 //! 最后**回读列表二次确认**。三个接口、两套状态、一个幂等键。
 //!
@@ -91,10 +92,15 @@ impl Campaign {
         !self.claimable && (self.status == "CONFIRMED" || self.status == "CONSUMED")
     }
 
-    /// 属于**可自动领**的那一类：每日登录送积分。注册礼 / 学生礼 / 邀请礼
-    /// 都故意不自动领 —— 它们是一次性奖励，自动领等于替用户做决定。
-    pub fn is_daily_login_credit(&self) -> bool {
-        self.kind == "USER_LOGIN" && self.benefit_unit == "CREDIT" && !self.key().is_empty()
+    /// 属于签到链**可自动领**的积分活动：每日登录、每日签到、新人注册与报名礼，
+    /// 学生认证与邀请礼仍不自动领取，前者依赖认证流程，后者会替其他用户做决定。
+    pub fn is_checkin_credit(&self) -> bool {
+        matches!(
+            self.kind.as_str(),
+            "USER_LOGIN" | "DAILY_CLAIM" | "NEW_USER_REGISTER" | "REGISTER"
+        )
+            && self.benefit_unit == "CREDIT"
+            && !self.key().is_empty()
     }
 
     /// 面板展示用的中文标题。
@@ -137,20 +143,17 @@ impl Campaign {
         self.kind.clone()
     }
 
-    /// 属于**新人注册礼**这一条 —— 签到中心「新手任务」只给这一条入口。
+    /// 属于**新人注册礼**这一条 —— 签到中心「新手任务」只展示这一条。
     ///
-    /// 官方 IDE 的 `ActivityWelfarePane.TYPE_ORDER` 把活动分成四类，`USER_LOGIN`
-    /// 之外还有三种。端点形状与每日那条完全一样（同一份 `POST /v1/ops/claim` +
-    /// `confirm`），所以"挑哪几条"就是两条链唯一的分界。本家只把
-    /// `NEW_USER_REGISTER` 做成可点的，另外两类**刻意不给入口**，理由各不相同，
-    /// 都不是"还没做"：
+    /// 官方活动按 kind 区分，端点形状与签到链完全一样（同一份
+    /// `POST /v1/ops/claim` + `confirm`），本模块只把 `NEW_USER_REGISTER`
+    /// 放进新手任务。另外两类**刻意不给入口**，理由各不相同，都不是"还没做"：
     ///   · `STUDENT_CERTIFIED` —— 真实清单里这一项 `claimable:false`（`status` 是 null），
     ///     前置是学生认证本身，而认证不是 API；给了按钮就是给一个必然失败的按钮。
     ///   · `INVITE_USER` —— `status:"ENTRY"`，收益归**邀请人**，由网关点这一下等于
     ///     替一个不是我们的用户做决定。
-    /// 与每日那条**不混领**：一个是每天的事，一个只有一次。领过一次之后上游不再回
-    /// `claimable`，所以面板上签到后的自动补领在这条上只会发一次写请求（见
-    /// `onboarding` 模块头对两条自动路径的划分）。
+    /// 签到链也会自动领取这条，新手任务分组继续作为一次性福利的查询与手动入口，
+    /// 两条入口共用上游状态与领取台账，已确认到账后再次经过任一路径都不会重复写。
     pub fn is_newbie_gift(&self) -> bool {
         self.kind == "NEW_USER_REGISTER" && !self.key().is_empty()
     }
@@ -413,7 +416,7 @@ impl Ledger {
 pub async fn preview(ctx: &PluginCtx, account_id: &str, base: &str, now_ms: i64) -> Result<Value, GatewayError> {
     let credential = current_credential(ctx, account_id).await?;
     let items = delivery(base, &credential).await?;
-    let daily: Vec<&Campaign> = items.iter().filter(|item| item.is_daily_login_credit()).collect();
+    let checkin: Vec<&Campaign> = items.iter().filter(|item| item.is_checkin_credit()).collect();
     let ledger = ledger_of(ctx, account_id, now_ms).await?;
     Ok(json!({
         "day": ledger.day,
@@ -421,7 +424,7 @@ pub async fn preview(ctx: &PluginCtx, account_id: &str, base: &str, now_ms: i64)
         "attemptsLeft": (MAX_ATTEMPTS_PER_DAY - ledger.attempts).max(0),
         "nextAttemptInMs": gap_remaining(&ledger, now_ms).map(|millis| millis as i64).unwrap_or(0),
         "acceptedToday": ledger.accepted,
-        "campaigns": daily
+        "campaigns": checkin
             .iter()
             .map(|item| json!({
                 "id": item.key(),
@@ -433,7 +436,7 @@ pub async fn preview(ctx: &PluginCtx, account_id: &str, base: &str, now_ms: i64)
                 "localClaimed": ledger.campaigns.get(&item.key()).map(|p| p.claimed).unwrap_or(false),
             }))
             .collect::<Vec<_>>(),
-        "eligible": daily.iter().any(|item| item.has_work()),
+        "eligible": checkin.iter().any(|item| item.has_work()),
         "note": "领取到账的是套餐赠送积分，不增加福利模型 token 池",
     }))
 }
@@ -515,8 +518,8 @@ pub fn gap_remaining(ledger: &Ledger, now_ms: i64) -> Option<u64> {
 /// 领哪一组活动。两组用的端点形状完全一样，区别只在**能不能无人值守地领**。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rewards {
-    /// 每日登录送积分（明天还有）
-    DailyLogin,
+    /// 签到链：每日奖励与一次性注册 / 报名礼
+    Checkin,
     /// 新人注册礼（每号只有一次，领早了撤不回）
     NewbieGift,
 }
@@ -524,7 +527,7 @@ pub enum Rewards {
 impl Rewards {
     fn selects(&self, item: &Campaign) -> bool {
         match self {
-            Rewards::DailyLogin => item.is_daily_login_credit(),
+            Rewards::Checkin => item.is_checkin_credit(),
             Rewards::NewbieGift => item.is_newbie_gift(),
         }
     }
@@ -532,7 +535,7 @@ impl Rewards {
     /// 日志与面板文案里的名字（两条链的文案不能混，否则"领到了"指的是别的东西）
     fn label(&self) -> &'static str {
         match self {
-            Rewards::DailyLogin => "每日福利",
+            Rewards::Checkin => "签到与福利",
             Rewards::NewbieGift => "新人注册礼",
         }
     }
@@ -553,7 +556,7 @@ pub async fn claim_account(
     now_ms: i64,
     manual: bool,
 ) -> Result<Outcome, GatewayError> {
-    Ok(claim_rewards(ctx, account_id, base, now_ms, manual, Rewards::DailyLogin).await?.outcome)
+    Ok(claim_rewards(ctx, account_id, base, now_ms, manual, Rewards::Checkin).await?.outcome)
 }
 
 /// 走一遍完整的领取流程。**这是本模块唯一会发写请求的函数。**
@@ -684,6 +687,62 @@ pub async fn refresh_usage(ctx: &PluginCtx, account_id: &str, now_ms: i64) -> Va
     balance::usage_document(Some(&statistics))
 }
 
+#[cfg(test)]
+mod selection_tests {
+    use serde_json::{Value, json};
+
+    use super::{Campaign, Rewards};
+
+    fn campaign(id: Value, kind: &str, claimable: bool) -> Campaign {
+        Campaign {
+            id,
+            kind: kind.to_string(),
+            title: String::new(),
+            claimable,
+            status: String::new(),
+            benefit_amount: 1000.0,
+            benefit_unit: "CREDIT".to_string(),
+        }
+    }
+
+    #[test]
+    fn checkin_rewards_cover_daily_and_registration_campaigns() {
+        for kind in ["USER_LOGIN", "DAILY_CLAIM", "NEW_USER_REGISTER", "REGISTER"] {
+            let item = campaign(json!("checkin"), kind, true);
+            assert!(item.is_checkin_credit(), "{kind} 必须进入签到候选");
+            assert!(Rewards::Checkin.selects(&item), "{kind} 必须走签到领取链");
+        }
+    }
+
+    #[test]
+    fn checkin_does_not_claim_certification_or_invite_rewards() {
+        for kind in ["STUDENT_CERTIFIED", "INVITE_USER"] {
+            let item = campaign(json!("manual"), kind, true);
+            assert!(!item.is_checkin_credit(), "{kind} 不应进入签到候选");
+            assert!(!Rewards::Checkin.selects(&item), "{kind} 不能自动领取");
+        }
+    }
+
+    #[test]
+    fn onboarding_group_keeps_its_new_user_scope() {
+        let newbie = campaign(json!("newbie"), "NEW_USER_REGISTER", true);
+        assert!(Rewards::NewbieGift.selects(&newbie));
+        for kind in ["USER_LOGIN", "DAILY_CLAIM", "REGISTER"] {
+            let item = campaign(json!("other"), kind, true);
+            assert!(!Rewards::NewbieGift.selects(&item), "{kind} 不能混入新人注册礼");
+        }
+    }
+
+    #[test]
+    fn unknown_ids_and_non_credit_units_never_enter_checkin() {
+        let without_id = campaign(Value::Null, "DAILY_CLAIM", true);
+        assert!(!without_id.is_checkin_credit(), "没有活动编号不能记台账");
+        let without_credit =
+            Campaign { benefit_unit: "POINT".to_string(), ..campaign(json!("point"), "DAILY_CLAIM", true) };
+        assert!(!without_credit.is_checkin_credit(), "非积分奖励不能冒充签到积分");
+    }
+}
+
 #[cfg(any())]
 mod tests {
     //! 领取状态机用**进程内 mock 上游**跑真流程（与 `session.rs` / `chat.rs` 同一手法）：
@@ -716,15 +775,18 @@ mod tests {
         assert_eq!("123", numeric.key());
         let broken = Campaign { id: Value::Null, ..numeric.clone() };
         assert_eq!("", broken.key(), "认不出的 id 不能拿去记台账");
-        assert!(!broken.is_daily_login_credit(), "没有键就绝不自动领");
+        assert!(!broken.is_checkin_credit(), "没有键就绝不自动领");
     }
 
     #[test]
-    fn only_daily_login_credits_are_eligible_for_auto_claim() {
-        assert!(campaign("a", "USER_LOGIN", "CREDIT", true, "").is_daily_login_credit());
-        // 注册礼 / 学生礼 / 邀请礼：一次性奖励，自动领等于替用户做决定
-        assert!(!campaign("b", "REGISTER", "CREDIT", true, "").is_daily_login_credit());
-        assert!(!campaign("c", "USER_LOGIN", "TOKEN", true, "").is_daily_login_credit());
+    fn only_approved_checkin_credits_are_eligible_for_auto_claim() {
+        assert!(campaign("a", "USER_LOGIN", "CREDIT", true, "").is_checkin_credit());
+        assert!(campaign("a", "DAILY_CLAIM", "CREDIT", true, "").is_checkin_credit());
+        assert!(campaign("b", "REGISTER", "CREDIT", true, "").is_checkin_credit());
+        assert!(campaign("c", "NEW_USER_REGISTER", "CREDIT", true, "").is_checkin_credit());
+        assert!(!campaign("d", "STUDENT_CERTIFIED", "CREDIT", true, "").is_checkin_credit());
+        assert!(!campaign("e", "INVITE_USER", "CREDIT", true, "").is_checkin_credit());
+        assert!(!campaign("f", "USER_LOGIN", "TOKEN", true, "").is_checkin_credit());
     }
 
     #[test]
@@ -1114,15 +1176,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registration_rewards_are_left_alone() {
+    async fn registration_rewards_follow_the_checkin_claim_chain() {
         let store = store_with("u7");
         let account_id = only_account_id(&store);
-        let upstream = mock_upstream(vec![delivery_of(vec![json!({
-            "campaignId": "r1", "type": "REGISTER", "claimable": true, "status": "", "benefitUnit": "CREDIT"
-        })])])
+        let upstream = mock_upstream(vec![
+            delivery_of(vec![json!({
+                "campaignId": "r1", "type": "REGISTER", "claimable": true, "status": "", "benefitUnit": "CREDIT"
+            })]),
+            json!({"code": 0, "data": {"campaignId": "r1"}}),
+            json!({"code": 0, "data": {}}),
+            delivery_of(vec![json!({
+                "campaignId": "r1", "type": "REGISTER", "claimable": false,
+                "status": "CONFIRMED", "benefitUnit": "CREDIT"
+            })]),
+        ])
         .await;
         let outcome = claim_account(&store, &account_id, &upstream.base, logging::now_ms(), true).await.expect("没有可领不是错误");
-        assert_eq!(Outcome::NotEligible, outcome);
-        assert_eq!(1, upstream.seen.lock().unwrap().len(), "一次性奖励绝不自动领");
+        assert_eq!(Outcome::Confirmed, outcome);
+        let seen = upstream.seen.lock().unwrap().clone();
+        assert_eq!(4, seen.len(), "探测 / claim / confirm / 回读各一次：{seen:?}");
+        assert!(seen[1].contains("\"r1\""), "报名礼必须按签到链领取：{}", seen[1]);
     }
 }

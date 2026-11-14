@@ -29,7 +29,7 @@ Capabilities supplied by Provider Enhancement. The table lists the currently ena
 | Cline (Free / Pass) | ✓ | ✓ | ✓ | ✓ | — | — |
 | Accio (international / domestic) | ✓ | ✓ | ✓ | ✓ | — | — |
 | ZCode (domestic / international) | ✓ | ✗ | ✗ | ✓ | — | ✓ |
-| CodeArts | ✓ | ✓ | ✓ | ✓ | — | ✓ |
+| CodeArts | ✓ | ✓ | ✓ | ✓ | ✓ (daily and event sign-in rewards) | ✓ (one-time registration / contest rewards) |
 | Trae | ✓ | ✓ | ✓ | ✓ | ✓ | Not provided by this plugin |
 | Loomy (iFlytek) | ✓ (chat / image generation / reference editing) | ✗ | ✓ | ✓ | ✓ | — |
 | KukuAI (Baidu Wenku) | ✓ | ✗ | ✓ | ✓ | ✓ | — |
@@ -49,7 +49,7 @@ Capabilities supplied by Provider Enhancement. The table lists the currently ena
 
 Custom providers remain a gateway feature and do not require this plugin. They support model requests and model-list fetching; other capabilities depend on the service you configure. API account creation skips a second proxy save only for `proxySaved: true`; older gateways retain a compatibility save and verification warning. Failure does not remove an added account or falsely report that its proxy was saved.
 
-> Note: model-list markers cover online fetching or static catalogs as specified by each row and implementation. Missing refresh or usage hooks do not establish that the upstream lacks an endpoint. Qoder check-in supports both regions; the international flow requires the local UMID component. Limited-time credit rewards, including Sonus, are queried and claimed individually under Check-in Center → Event rewards, separately from daily check-in (implemented, not yet verified with a live claim); QwenWork has **no** check-in endpoint on either edition (nor a personal access token or claimable campaigns — those three genuinely do not exist upstream, rather than being "not implemented yet").
+> Note: model-list markers cover online fetching or static catalogs as specified by each row and implementation. Missing refresh or usage hooks do not establish that the upstream lacks an endpoint. CodeArts check-in claims daily login / sign-in rewards and approved one-time registration or contest rewards; student-certification and invite rewards stay manual because their prerequisites and recipients are not controlled by the gateway. Qoder check-in supports both regions; the international flow requires the local UMID component. Limited-time credit rewards, including Sonus, are queried and claimed individually under Check-in Center → Event rewards, separately from daily check-in (implemented, not yet verified with a live claim); QwenWork has **no** check-in endpoint on either edition (nor a personal access token or claimable campaigns — those three genuinely do not exist upstream, rather than being "not implemented yet").
 >
 > QwenWork sign-in: the **China edition** uses the official OAuth page (authorization code with a loopback callback, the same route the official CLI / IDE takes) and the account joins the list by itself. The **international edition is hidden from the list** (2026-11-03). Its chat and usage paths work, but sign-in is blocked upstream: the upstream accepts only its own registered callback address, so the code never reaches this machine, and its device-code endpoint has been retired — an account simply cannot be added. The code stays in place; removing the id from the gateway's suspended list (`availability.rs`) re-enables it.
 >

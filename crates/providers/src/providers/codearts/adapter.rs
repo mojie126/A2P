@@ -151,7 +151,7 @@ impl Provider for CodeArtsProvider {
                 model_refresh: true,
                 // 套餐总积分及分项积分（`balance.rs`）
                 usage: true,
-                // 每日 ops 福利 = 本家的「签到」（`welfare.rs`）
+                // 每日福利、签到礼与一次性报名礼 = 本家的「签到」（`welfare.rs`）
                 checkin: true,
                 // 新人注册礼（`onboarding.rs`）
                 claims: true,
@@ -209,7 +209,8 @@ impl Provider for CodeArtsProvider {
             })
         .with_checkin(proto::CheckinInfo {
             description: Some(
-                "每日福利 · 领取 → 确认 → 回读核实 · 按北京时间自然日重置".to_string(),
+                "每日签到、福利与一次性报名礼 · 领取 → 确认 → 回读核实 · 按北京时间自然日重置"
+                    .to_string(),
             ),
             modes: vec![proto::CheckinMode::Checkin],
             onboarding: true,
@@ -665,7 +666,7 @@ impl Provider for CodeArtsProvider {
 
     // ── 签到 / 领取 ───────────────────────────────────────────
 
-    /// 每日签到 = 本家的「每日登录送积分」那一组 ops 福利（`welfare.rs`）。
+    /// 签到 = 每日登录福利、每日签到礼与一次性报名礼（`welfare.rs`）。
     ///
     /// 未携带触发来源的旧调用按自动路径处理，避免绕过无人值守的写请求限制。
     fn checkin<'a>(&'a self, ctx: &'a PluginCtx, account: &'a str) -> SendFuture<'a, proto::CheckinReport> {
