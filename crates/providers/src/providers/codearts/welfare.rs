@@ -103,6 +103,19 @@ impl Campaign {
             && !self.key().is_empty()
     }
 
+    /// 是否为 Skill 创新赛的一次性报名礼。
+    ///
+    /// 该活动与每日签到礼共用 `kind = USER_LOGIN`，只能按上游原始标题区分，
+    /// 每日签到礼的标题包含 `Daily Check-in`，不能纳入新手福利。
+    pub fn is_skill_contest_gift(&self) -> bool {
+        if self.kind != "USER_LOGIN" || self.benefit_unit != "CREDIT" || self.key().is_empty() {
+            return false;
+        }
+        let title = self.title.trim();
+        title.contains("Skill创新赛报名礼")
+            || title.eq_ignore_ascii_case("Gift for the Skill Innovation Contest")
+    }
+
     /// 面板展示用的中文标题。
     ///
     /// ── 为什么要映射（不直接用上游 title）────────────────────────
@@ -126,6 +139,9 @@ impl Campaign {
     /// 认不出的 kind 回退上游原文（再空才回退 kind 本身）—— 上游新增活动类型时
     /// 面板不会开天窗，只是那一行暂时保持原文。
     pub fn display_title(&self) -> String {
+        if self.is_skill_contest_gift() {
+            return "Skill创新赛报名礼".to_string();
+        }
         let mapped = match self.kind.as_str() {
             "DAILY_CLAIM" => "每日签到",
             "USER_LOGIN" => "用户登录送积分",
@@ -143,19 +159,21 @@ impl Campaign {
         self.kind.clone()
     }
 
-    /// 属于**新人注册礼**这一条 —— 签到中心「新手任务」只展示这一条。
+    /// 属于签到中心「新手福利」的一次性注册或报名奖励。
     ///
     /// 官方活动按 kind 区分，端点形状与签到链完全一样（同一份
-    /// `POST /v1/ops/claim` + `confirm`），本模块只把 `NEW_USER_REGISTER`
-    /// 放进新手任务。另外两类**刻意不给入口**，理由各不相同，都不是"还没做"：
+    /// `POST /v1/ops/claim` + `confirm`），本模块把 `NEW_USER_REGISTER`
+    /// 与 `REGISTER` 都放进新手福利。另外两类**刻意不给入口**，理由各不相同，
+    /// 都不是"还没做"：
     ///   · `STUDENT_CERTIFIED` —— 真实清单里这一项 `claimable:false`（`status` 是 null），
     ///     前置是学生认证本身，而认证不是 API；给了按钮就是给一个必然失败的按钮。
     ///   · `INVITE_USER` —— `status:"ENTRY"`，收益归**邀请人**，由网关点这一下等于
     ///     替一个不是我们的用户做决定。
     /// 签到链也会自动领取这条，新手任务分组继续作为一次性福利的查询与手动入口，
     /// 两条入口共用上游状态与领取台账，已确认到账后再次经过任一路径都不会重复写。
-    pub fn is_newbie_gift(&self) -> bool {
-        self.kind == "NEW_USER_REGISTER" && !self.key().is_empty()
+    pub fn is_onboarding_gift(&self) -> bool {
+        (matches!(self.kind.as_str(), "NEW_USER_REGISTER" | "REGISTER") && !self.key().is_empty())
+            || self.is_skill_contest_gift()
     }
 
     /// 这一条还有活要干吗（要么能领，要么领了没确认）。
@@ -428,6 +446,9 @@ pub async fn preview(ctx: &PluginCtx, account_id: &str, base: &str, now_ms: i64)
             .iter()
             .map(|item| json!({
                 "id": item.key(),
+                "kind": item.kind,
+                "title": item.display_title(),
+                "upstreamTitle": item.title,
                 "status": item.status,
                 "claimable": item.claimable,
                 "benefitAmount": item.benefit_amount,
@@ -520,15 +541,15 @@ pub fn gap_remaining(ledger: &Ledger, now_ms: i64) -> Option<u64> {
 pub enum Rewards {
     /// 签到链：每日奖励与一次性注册 / 报名礼
     Checkin,
-    /// 新人注册礼（每号只有一次，领早了撤不回）
-    NewbieGift,
+    /// 新手福利：新人注册礼与报名礼（每号各一次，领早了撤不回）
+    OnboardingGifts,
 }
 
 impl Rewards {
     fn selects(&self, item: &Campaign) -> bool {
         match self {
             Rewards::Checkin => item.is_checkin_credit(),
-            Rewards::NewbieGift => item.is_newbie_gift(),
+            Rewards::OnboardingGifts => item.is_onboarding_gift(),
         }
     }
 
@@ -536,7 +557,7 @@ impl Rewards {
     fn label(&self) -> &'static str {
         match self {
             Rewards::Checkin => "签到与福利",
-            Rewards::NewbieGift => "新人注册礼",
+            Rewards::OnboardingGifts => "新手福利",
         }
     }
 }
@@ -667,10 +688,10 @@ pub async fn claim_rewards(
     Ok(Run { outcome: Outcome::Confirmed, before: picked, after: verified })
 }
 
-/// 只读地把**新人注册礼**取回来（签到中心的「新手任务」用，一个写请求都不发）。
-pub async fn newbie_gift(ctx: &PluginCtx, account_id: &str, base: &str) -> Result<Vec<Campaign>, GatewayError> {
+/// 只读地把**新手福利**取回来（新人注册礼与报名礼，一个写请求都不发）。
+pub async fn onboarding_gifts(ctx: &PluginCtx, account_id: &str, base: &str) -> Result<Vec<Campaign>, GatewayError> {
     let credential = current_credential(ctx, account_id).await?;
-    Ok(delivery(base, &credential).await?.into_iter().filter(Campaign::is_newbie_gift).collect())
+    Ok(delivery(base, &credential).await?.into_iter().filter(Campaign::is_onboarding_gift).collect())
 }
 
 #[allow(dead_code)]
@@ -724,12 +745,21 @@ mod selection_tests {
     }
 
     #[test]
-    fn onboarding_group_keeps_its_new_user_scope() {
-        let newbie = campaign(json!("newbie"), "NEW_USER_REGISTER", true);
-        assert!(Rewards::NewbieGift.selects(&newbie));
-        for kind in ["USER_LOGIN", "DAILY_CLAIM", "REGISTER"] {
+    fn onboarding_group_covers_new_user_and_contest_registration_rewards() {
+        for kind in ["NEW_USER_REGISTER", "REGISTER"] {
+            let item = campaign(json!("one-shot"), kind, true);
+            assert!(Rewards::OnboardingGifts.selects(&item), "{kind} 必须进入新手福利");
+        }
+        let contest = Campaign {
+            title: "Gift for the Skill Innovation Contest".to_string(),
+            ..campaign(json!("contest"), "USER_LOGIN", true)
+        };
+        assert!(contest.is_skill_contest_gift());
+        assert!(Rewards::OnboardingGifts.selects(&contest));
+        assert_eq!("Skill创新赛报名礼", contest.display_title());
+        for kind in ["USER_LOGIN", "DAILY_CLAIM"] {
             let item = campaign(json!("other"), kind, true);
-            assert!(!Rewards::NewbieGift.selects(&item), "{kind} 不能混入新人注册礼");
+            assert!(!Rewards::OnboardingGifts.selects(&item), "{kind} 不能混入新手福利");
         }
     }
 
@@ -1132,7 +1162,7 @@ mod tests {
             ]),
         ])
         .await;
-        let run = claim_rewards(&store, &account_id, &newbie.base, logging::now_ms(), true, Rewards::NewbieGift)
+        let run = claim_rewards(&store, &account_id, &newbie.base, logging::now_ms(), true, Rewards::OnboardingGifts)
             .await
             .expect("新人礼该领成");
         assert_eq!(Outcome::Confirmed, run.outcome);
@@ -1164,7 +1194,7 @@ mod tests {
             "status": "CONFIRMED", "benefitUnit": "CREDIT", "benefitAmount": 4000
         })])])
         .await;
-        let run = claim_rewards(&store, &account_id, &upstream.base, logging::now_ms(), true, Rewards::NewbieGift)
+        let run = claim_rewards(&store, &account_id, &upstream.base, logging::now_ms(), true, Rewards::OnboardingGifts)
             .await
             .expect("已领过不是错误");
         assert_eq!(Outcome::Already, run.outcome);

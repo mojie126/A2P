@@ -102,12 +102,17 @@ pub async fn remember(
         }
         _ => crate::http::now_ms(),
     };
-    let snapshot = json!({
+    let mut snapshot = json!({
         "at": at,
         "tasks": tasks,
         "earned": payload.get("earned").cloned().unwrap_or(Value::Null),
         "total": payload.get("total").cloned().unwrap_or(Value::Null),
     });
+    if let Some(version) = payload.get("scopeVersion").cloned() {
+        if let Some(object) = snapshot.as_object_mut() {
+            object.insert("scopeVersion".to_string(), version);
+        }
+    }
     if ctx
         .ledger_put(account_id, LEDGER_KIND, &snapshot)
         .await

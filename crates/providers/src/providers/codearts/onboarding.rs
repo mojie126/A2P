@@ -1,10 +1,11 @@
-//! CodeArts 的**新手任务**：目前只有「新人注册礼」这一条。
+//! CodeArts 的**新手福利**：新人注册礼与一次性报名礼。
 //!
 //! ── 上游契约（读的是同一张口，不是新端点）──────────────────
 //! 与签到福利共用 `GET /v1/ops/delivery?channel=IDE` → `POST /v1/ops/claim`
 //! → `POST /v1/ops/confirm`，执行体也共用 [`welfare::claim_rewards`] ——
 //! 幂等键先落盘、领完回读活动列表二次确认这两条硬约束因此自动生效。
-//! 唯一的区别是**挑哪一条活动**：[`welfare::Campaign::is_newbie_gift`]。
+//! 挑选范围见 [`welfare::Campaign::is_onboarding_gift`]。Skill 创新赛报名礼
+//! 与每日签到礼共用 `USER_LOGIN` 类型，只按上游标题区分，不能只看类型。
 //!
 //! ── 学生认证与邀请礼**不给入口**（不是"还没做"）────────────
 //! 官方活动类型除每日奖励与注册 / 报名礼外，本模块有意不接：
@@ -40,7 +41,10 @@ fn base() -> &'static str {
 }
 
 /// 任务分组名（面板按 group 分小节展示，与 Loomy / 小浣熊同层）。
-const TASK_GROUP: &str = "新人注册礼";
+const TASK_GROUP: &str = "一次性福利";
+
+/// 新手福利筛选范围的版本。旧快照只含新人注册礼，升级后必须自动重查一次。
+const ONBOARDING_SCOPE_VERSION: i64 = 3;
 
 /// 这一条现在值不值得动手（能领，或领了还没确认）。
 fn actionable(item: &Campaign) -> bool {
@@ -119,7 +123,14 @@ fn with_meta(mut payload: Value) -> Value {
 /// 网关版读账号记录的 `onboardingSettled` 字段；插件没有记录字段的写权限，
 /// 改用同名 ledger kind（见 `crate::onboarding`）。语义与形状逐字不变。
 async fn settled_snapshot(ctx: &PluginCtx, account_id: &str) -> Option<Value> {
-    onboarding_memory::load(ctx, account_id).await
+    onboarding_memory::load(ctx, account_id)
+        .await
+        .filter(is_current_snapshot)
+}
+
+/// 旧版本快照缺少当前筛选范围，不能作为「已结清」结果直接复用。
+fn is_current_snapshot(snapshot: &Value) -> bool {
+    snapshot.get("scopeVersion").and_then(Value::as_i64) == Some(ONBOARDING_SCOPE_VERSION)
 }
 
 /// `GET /api/accounts/{id}/onboarding` —— 状态快照。
@@ -139,7 +150,7 @@ pub async fn get_tasks(
             return Ok(with_meta(onboarding_memory::serve(snapshot)));
         }
     }
-    let items = welfare::newbie_gift(ctx, account_id, base()).await?;
+    let items = welfare::onboarding_gifts(ctx, account_id, base()).await?;
     let rows: Vec<Value> = items.iter().map(task_row).collect();
     // 上游这次一条新人礼都没回，而记忆里**有**已结算的结论 ⇒ 用记忆回答。
     // 活动被领完之后从运营列表里消失是上游的正当行为（`CONSUMED` 之后不再下发），
@@ -156,6 +167,7 @@ pub async fn get_tasks(
         "earned": points_sum(&rows, true),
         "total": points_sum(&rows, false),
         "unclaimed": unclaimed,
+        "scopeVersion": ONBOARDING_SCOPE_VERSION,
         // 界面据此判断「这条一次性福利到此为止」（`remember` 也按它落 / 清记忆）：
         // 与 Loomy / 小浣熊同名字段，消费方不必按 provider 分叉。判据是
         // `all_settled`（每一条都已到账）而不是 `unclaimed == 0` —— 后者会把
@@ -199,7 +211,7 @@ pub async fn claim_all(ctx: &PluginCtx, account_id: &str) -> Result<Value, Gatew
         base(),
         now_ms,
         true,
-        welfare::Rewards::NewbieGift,
+        welfare::Rewards::OnboardingGifts,
     )
     .await?;
     // 领取流程只在「全部回读确认」时才交出 after；其余分支（已领过 / 没有活 /
@@ -207,14 +219,14 @@ pub async fn claim_all(ctx: &PluginCtx, account_id: &str) -> Result<Value, Gatew
     // 额外打一次 delivery**（旧实现在 after 为空时回落到 `newbie_gift`，
     // 那是一次多余的只读请求）。
     let after: Vec<Campaign> = if run.after.is_empty() { run.before.clone() } else { run.after };
-    // 任务清单恒为「新人礼那一条」：`after` 在成功路径上是回读的**全量**活动
+    // 任务清单恒为新手福利那几条：`after` 在成功路径上是回读的**全量**活动
     // 列表（执行体要它逐条确认），直接拿它铺行会让卡片在领取后多出邀请 /
     // 学生认证 / 每日签到三条 —— 同一张卡片「查询」一条、「领取」四条，
-    // 点一次变一次。这里与 `get_tasks` 同用 `is_newbie_gift` 一把筛子，
+    // 点一次变一次。这里与 `get_tasks` 同用 `is_onboarding_gift` 一把筛子，
     // 两个接口的 tasks / earned / total / unclaimed 因此永远同源。
     let rows: Vec<Value> = after
         .iter()
-        .filter(|item| item.is_newbie_gift())
+        .filter(|item| item.is_onboarding_gift())
         .map(task_row)
         .collect();
     // 本轮真正到手的那几条：领取前有活、回读之后已确认
@@ -251,6 +263,7 @@ pub async fn claim_all(ctx: &PluginCtx, account_id: &str) -> Result<Value, Gatew
         "total": points_sum(&rows, false),
         "unclaimed": unclaimed_of(&rows),
         "settled": all_settled(&rows),
+        "scopeVersion": ONBOARDING_SCOPE_VERSION,
         "outcome": run.outcome.label(),
     }));
     // 本轮确实有这一条活动 ⇒ 顺手同步记忆（判据与 `get_tasks` 同一把：非空才
@@ -277,6 +290,20 @@ fn settled_claim_response(snapshot: &Value) -> Value {
     with_meta(payload)
 }
 
+#[cfg(test)]
+mod scope_tests {
+    use serde_json::json;
+
+    use super::{is_current_snapshot, ONBOARDING_SCOPE_VERSION};
+
+    #[test]
+    fn only_snapshots_with_the_current_scope_version_are_reused() {
+        assert!(!is_current_snapshot(&json!({"tasks": []})));
+        assert!(!is_current_snapshot(&json!({"scopeVersion": 2, "tasks": []})));
+        assert!(is_current_snapshot(&json!({"scopeVersion": ONBOARDING_SCOPE_VERSION, "tasks": []})));
+    }
+}
+
 #[cfg(any())]
 mod shaping {
     use super::*;
@@ -295,17 +322,19 @@ mod shaping {
     }
 
     #[test]
-    fn only_the_newbie_gift_is_a_task_and_the_other_three_kinds_stay_out() {
-        assert!(campaign("4", "NEW_USER_REGISTER", "新人注册礼", true, "", 4000.0).is_newbie_gift());
-        // 每日那条不是新手任务（混领就是把每天的事当成只有一次的事做）
-        assert!(!campaign("1", "USER_LOGIN", "每日签到领1000积分", true, "", 1000.0).is_newbie_gift());
+    fn only_new_user_and_registration_gifts_are_tasks() {
+        assert!(campaign("4", "NEW_USER_REGISTER", "新人注册礼", true, "", 4000.0).is_onboarding_gift());
+        assert!(campaign("7", "REGISTER", "Skill创新赛报名礼", true, "", 2000.0).is_onboarding_gift());
+        assert!(campaign("8", "USER_LOGIN", "Gift for the Skill Innovation Contest", true, "", 2000.0).is_onboarding_gift());
+        // 每日那条不是新手福利（混领就是把每天的事当成只有一次的事做）
+        assert!(!campaign("1", "USER_LOGIN", "每日签到领1000积分", true, "", 1000.0).is_onboarding_gift());
         // 这两类**有意不给入口**（理由见模块头），不是漏做：学生认证的前置是认证本身、
         // 邀请礼的收益归邀请人。判据收窄到一条，界面上就不会出现必然失败的按钮。
-        assert!(!campaign("2", "STUDENT_CERTIFIED", "学生认证", true, "", 4000.0).is_newbie_gift());
-        assert!(!campaign("3", "INVITE_USER", "邀请好友", true, "ENTRY", 1000.0).is_newbie_gift());
+        assert!(!campaign("2", "STUDENT_CERTIFIED", "学生认证", true, "", 4000.0).is_onboarding_gift());
+        assert!(!campaign("3", "INVITE_USER", "邀请好友", true, "ENTRY", 1000.0).is_onboarding_gift());
         // 认不出键的条目不算任务（没有键就没法记台账、也没法回读确认）
-        assert!(!Campaign { id: Value::Null, ..campaign("4", "NEW_USER_REGISTER", "", true, "", 1.0) }.is_newbie_gift());
-        assert!(!campaign("", "NEW_USER_REGISTER", "空键", true, "", 1.0).is_newbie_gift());
+        assert!(!Campaign { id: Value::Null, ..campaign("4", "NEW_USER_REGISTER", "", true, "", 1.0) }.is_onboarding_gift());
+        assert!(!campaign("", "NEW_USER_REGISTER", "空键", true, "", 1.0).is_onboarding_gift());
     }
 
     #[test]
@@ -357,6 +386,10 @@ mod shaping {
         assert_eq!(
             "邀请好友",
             task_row(&campaign("3", "INVITE_USER", "Invite & Earn with Referral Codes", true, "ENTRY", 1000.0))["title"]
+        );
+        assert_eq!(
+            "Skill创新赛报名礼",
+            task_row(&campaign("7", "REGISTER", "Skill创新赛报名礼", true, "", 2000.0))["title"]
         );
         // 认不出的类：回退上游原文；上游也没给才回退 kind
         assert_eq!(
