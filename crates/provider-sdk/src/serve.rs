@@ -48,6 +48,7 @@ pub async fn serve(providers: Vec<BoxProvider>) -> std::io::Result<()> {
 }
 
 pub async fn serve_with(providers: Vec<BoxProvider>, options: ServeOptions) -> std::io::Result<()> {
+    crate::serve_options::install_panic_hook();
     let host = Arc::new(Serve::new(providers, options));
     let _ = HOST.set(host.clone());
     host.run().await
