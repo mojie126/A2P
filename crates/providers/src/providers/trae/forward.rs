@@ -434,7 +434,9 @@ async fn deliver(
 /// 收尾帧的逐轮账单缓存补全。SSE 的缓存 0 不能证明未命中（真机实测
 /// SSE 两轮全 0、账单 cache_read_token=25344），权威值在账单的
 /// `extra_info` 里；查到并进 usage，查不到保持原样，不编数字。
-/// 上游 SSE 自己已报正缓存时跳过查询：报了就没有再查的必要。
+/// 账单是 session 累计读数，这里先按台账换成单轮差值再写入，
+/// 避免把整个会话的缓存命中当成本轮上下文。上游 SSE 自己已报正缓存时
+/// 跳过查询：报了就没有再查的必要。
 async fn enrich_usage_with_bill(bill: &BillQuery, usage: &mut Value) {
     if !usage.is_object() {
         return;
@@ -451,7 +453,8 @@ async fn enrich_usage_with_bill(bill: &BillQuery, usage: &mut Value) {
     if seen > 0 {
         return;
     }
-    let cache = bill.fetch_cache().await;
+    let cumulative = bill.fetch_cache().await;
+    let cache = bill.round_cache(&cumulative).await;
     if !cache.is_empty() && billing::merge_into_usage(usage, &cache) {
         logging::verbose(
             "[Trae]",
@@ -577,7 +580,14 @@ pub(crate) async fn forward_at(
             match prepared {
                 Ok((prefetched, source, mut solo, scanner)) => {
                     models::remember_route(&credential, wire_model, &route);
-                    let bill = BillQuery::new(base, &session, &credential, effective.as_ref());
+                    let bill = BillQuery::new(
+                        ctx,
+                        account_id,
+                        base,
+                        &session,
+                        &credential,
+                        effective.as_ref(),
+                    );
                     if !stream {
                         let mut completion = match drive_aggregate(
                             source, &mut solo, scanner, prefetched, requested, &telemetry,

@@ -13,6 +13,14 @@
 //! （查回全零骨架，2026-10-31 定案的根因）。本家的 session_id 由
 //! `forward::session_id` 主动写入请求体，这里用同一个值查账。
 //!
+//! ── 累计账单必须换算成单轮差值 ────────────────────────────
+//! 账单里的 `cache_read_token` 是该 session 的**累计**读数，不是本轮增量。
+//! 直接并入本轮 usage 会让客户端把整个会话的缓存命中当成本轮上下文：
+//! Claude Code 一侧按 `input + cache_read + cache_creation` 估算上下文，
+//! 每次请求都看到越来越大的累计值，会误判上下文膨胀而反复自动压缩。
+//! 因此按 session 记录上一次累计读数（插件台账），本轮只上报差值；
+//! 台账读不到就不补全，宁可保持上游原样，也不把累计值写进单轮用量。
+//!
 //! ── 落账延迟与预算 ────────────────────────────────────────
 //! 账单落库有秒级延迟（参考实现重试 3 次、1.5s/3s 退避）。参考实现是
 //! 异步补账不阻塞响应，本家在收尾帧发送前同步查 —— 插件侧没有上报通道，
@@ -26,6 +34,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use agent2api_provider_protocol::WireProxy as ResolvedProxy;
+use agent2api_provider_sdk::PluginCtx;
 
 use super::credentials::Credential;
 use super::headers::{self, HeaderIdentity};
@@ -34,6 +43,9 @@ use crate::logging;
 
 /// 账单接口路径（对齐参考实现 `constants.EP_SESSION_USAGE`）。
 const EP_SESSION_USAGE: &str = "/api/v1/commercial/get_session_usage";
+
+/// 按 session 保存上次累计读数的台账前缀。
+const LEDGER_KIND_PREFIX: &str = "traeBillCache";
 
 /// 单次账单请求的超时。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
@@ -67,11 +79,15 @@ pub(crate) struct BillQuery {
     session_id: String,
     headers: BTreeMap<String, String>,
     proxy: Option<ResolvedProxy>,
+    ctx: PluginCtx,
+    account: String,
 }
 
 impl BillQuery {
     /// 用当前凭据组一次查询上下文（账单键就是请求体里主动写的 session_id）。
     pub(crate) fn new(
+        ctx: &PluginCtx,
+        account: &str,
         base: &str,
         session_id: &str,
         credential: &Credential,
@@ -88,7 +104,36 @@ impl BillQuery {
             session_id: session_id.trim().to_string(),
             headers: headers::solo_headers(&identity, false),
             proxy: proxy.cloned(),
+            ctx: ctx.clone(),
+            account: account.trim().to_string(),
         }
+    }
+
+    /// 把账单的累计读数换算成本轮增量。
+    ///
+    /// 台账按 session 保存上一次累计值；读不到台账就不补全（返回空），
+    /// 避免把整个会话的缓存累计当成本轮命中。写回失败不影响本轮响应，
+    /// 下一轮会重新按当时的累计值求差。
+    pub(crate) async fn round_cache(&self, cumulative: &BillCache) -> BillCache {
+        if self.session_id.is_empty() || cumulative.is_empty() {
+            return BillCache::default();
+        }
+        let kind = format!("{LEDGER_KIND_PREFIX}:{}", self.session_id);
+        let previous = match self.ctx.ledger_get(&self.account, &kind).await {
+            Ok(value) => parse_ledger_cache(&value),
+            // 没有台账就无法证明上一轮读数，保持上游原样比写累计值安全
+            Err(_) => return BillCache::default(),
+        };
+        let round = round_delta(previous, *cumulative);
+        let _ = self
+            .ctx
+            .ledger_put(
+                &self.account,
+                &kind,
+                &json!({ "read": cumulative.read, "write": cumulative.write }),
+            )
+            .await;
+        round
     }
 
     /// 查一轮账单的缓存计数。失败与查不到都返回空值，
@@ -190,6 +235,38 @@ pub(crate) fn parse_bill_cache(data: &Value) -> BillCache {
     }
 }
 
+/// 从台账读上一次累计读数；空台账或损坏内容返回 None。
+fn parse_ledger_cache(value: &Value) -> Option<BillCache> {
+    let object = value.as_object()?;
+    let read = object.get("read").and_then(Value::as_i64);
+    let write = object.get("write").and_then(Value::as_i64);
+    if read.is_none() && write.is_none() {
+        return None;
+    }
+    Some(BillCache { read, write })
+}
+
+/// 累计读数换算成单轮增量。
+///
+/// 首次没有台账时把当前累计当作本轮读数（新 session 的第一次请求两者相等）；
+/// 累计回退说明账单被重置，按当前值重新起算，绝不输出负增量。
+fn round_delta(previous: Option<BillCache>, current: BillCache) -> BillCache {
+    let delta = |current: Option<i64>, previous: Option<i64>| {
+        current.map(|now| {
+            let before = previous.unwrap_or(0);
+            if now >= before {
+                now - before
+            } else {
+                now
+            }
+        })
+    };
+    BillCache {
+        read: delta(current.read, previous.and_then(|cache| cache.read)),
+        write: delta(current.write, previous.and_then(|cache| cache.write)),
+    }
+}
+
 /// 把账单缓存并进用量对象：写 OpenAI 标准位（网关的缓存别名表都认）。
 /// 只在拿到账单读数时写对应键，缺失项保持原样 —— 不把「没查到」伪造成命中。
 pub(crate) fn merge_into_usage(usage: &mut Value, cache: &BillCache) -> bool {
@@ -198,6 +275,11 @@ pub(crate) fn merge_into_usage(usage: &mut Value, cache: &BillCache) -> bool {
     };
     let mut changed = false;
     if let Some(read) = cache.read {
+        // 单轮缓存命中不可能超过本轮 prompt；上限防御累计值漏进单轮口径
+        let read = match object.get("prompt_tokens").and_then(Value::as_i64) {
+            Some(prompt) if prompt > 0 => read.min(prompt),
+            _ => read,
+        };
         let details = object
             .entry("prompt_tokens_details".to_string())
             .or_insert_with(|| json!({}));
@@ -298,5 +380,94 @@ mod tests {
         assert!(!merge_into_usage(&mut usage, &BillCache::default()));
         assert!(usage.get("prompt_tokens_details").is_none());
         assert!(usage.get("cache_creation_input_tokens").is_none());
+    }
+
+    #[test]
+    fn round_delta_turns_cumulative_reads_into_this_turn() {
+        // 首次请求：台账为空，累计值就是本轮值
+        assert_eq!(
+            round_delta(
+                None,
+                BillCache {
+                    read: Some(25_344),
+                    write: Some(0)
+                }
+            ),
+            BillCache {
+                read: Some(25_344),
+                write: Some(0)
+            }
+        );
+        // 后续请求：只上报相对上次累计的增量
+        assert_eq!(
+            round_delta(
+                Some(BillCache {
+                    read: Some(25_344),
+                    write: Some(100)
+                }),
+                BillCache {
+                    read: Some(48_000),
+                    write: Some(300)
+                }
+            ),
+            BillCache {
+                read: Some(22_656),
+                write: Some(200)
+            }
+        );
+        // 累计回退（账单重置）：按当前值重新起算，绝不输出负增量
+        assert_eq!(
+            round_delta(
+                Some(BillCache {
+                    read: Some(900_000),
+                    write: Some(0)
+                }),
+                BillCache {
+                    read: Some(12_000),
+                    write: Some(0)
+                }
+            ),
+            BillCache {
+                read: Some(12_000),
+                write: Some(0)
+            }
+        );
+        // 某一项缺失时不臆造差值
+        assert_eq!(
+            round_delta(
+                Some(BillCache {
+                    read: Some(10),
+                    write: Some(5)
+                }),
+                BillCache::default()
+            ),
+            BillCache::default()
+        );
+    }
+
+    #[test]
+    fn ledger_cache_reads_only_complete_entries() {
+        assert_eq!(parse_ledger_cache(&json!(null)), None);
+        assert_eq!(parse_ledger_cache(&json!({})), None);
+        assert_eq!(
+            parse_ledger_cache(&json!({ "read": 2_816, "write": 0 })),
+            Some(BillCache {
+                read: Some(2_816),
+                write: Some(0)
+            })
+        );
+    }
+
+    #[test]
+    fn merge_caps_cache_read_at_the_round_prompt() {
+        let mut usage = json!({ "prompt_tokens": 100 });
+        assert!(merge_into_usage(
+            &mut usage,
+            &BillCache {
+                read: Some(500),
+                write: None
+            }
+        ));
+        assert_eq!(usage["prompt_tokens_details"]["cached_tokens"], 100);
     }
 }
