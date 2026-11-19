@@ -159,6 +159,13 @@ impl Provider for RaccoonProvider {
         })
     }
 
+    // 对齐官方 wasm/raccoon/src/chat.rs 的 forward 判定：2xx 但返回
+    // JSON 信封说明是错误响应而非 SSE 流，交宿主走错误分类。
+    fn is_error_response(&self, status: u16, headers: &std::collections::BTreeMap<String, String>) -> bool {
+        !(200..300).contains(&status) || headers.get("content-type")
+            .is_some_and(|value| value.to_ascii_lowercase().contains("application/json"))
+    }
+
     fn chat_policy(&self, _body: &Value) -> Value {
         json!({ "respectModelCooldown": true })
     }

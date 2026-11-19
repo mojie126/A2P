@@ -131,6 +131,11 @@ pub fn build_upstream_request(
         // 让上游在最后一帧带上 usage（不要求它就永远不会给）
         object.insert("stream_options".to_string(), json!({ "include_usage": true }));
     }
+    // 对齐官方 wasm/codearts（ab6432d）：stop 是上游明确拒绝的字段（字符串与
+    // 数组都报 `InferHub.001001005.400`），删除比改写可靠，不透传客户端的无效参数。
+    if object.remove("stop").is_some() {
+        crate::logging::verbose("[CodeArts]", "出站前摘掉 stop：上游对该字段整条拒收");
+    }
     // 「关思考」在本家没有可发送的表达：始终思考的名字收到 `reasoning_effort:"none"`
     // 会被上游整条拒掉（dev 一手：Qoder 的侧路调用每发都撞，错误是
     // `InferHub.malformed_json.400：该模型始终思考，不支持关闭思考；请使用 low、high 或 max`）。

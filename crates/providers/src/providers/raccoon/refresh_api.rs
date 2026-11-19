@@ -90,6 +90,14 @@ pub(super) async fn call(
                 .filter(|value| !value.is_empty())
         })
         .unwrap_or_else(|| credentials.user_id.clone());
+    // 对齐官方 wasm/raccoon/src/refresh_api.rs：续期返回的平台用户与原账号
+    // 不一致时拒绝覆盖，避免把另一个账号的凭证写进当前账号。
+    if !credentials.user_id.is_empty() && next.user_id != credentials.user_id {
+        return Err(GatewayError::with_status(
+            409,
+            "小浣熊续期返回了不同平台账号，未覆盖现有凭据",
+        ));
+    }
     next.token = access_token;
     next.refresh_token = next_refresh;
     logging::verbose(

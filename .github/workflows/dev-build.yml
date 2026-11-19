@@ -82,6 +82,20 @@ jobs:
         with:
           node-version: 22
 
+      - name: 校验版本基线
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 插件包版本号（pack.json）与编译进二进制的版本（workspace Cargo.toml）
+          # 必须一致，否则产物的包名与运行时自报版本会漂移
+          pack="$(node -p "require('./pack.json').version")"
+          cargo_version="$(cargo pkgid -p agent2api-providers | sed 's/.*@//')"
+          if [[ -z "$pack" || "$pack" != "$cargo_version" ]]; then
+            echo "::error::版本号不一致：pack.json=$pack Cargo=$cargo_version"
+            exit 1
+          fi
+          echo "版本基线一致：$pack"
+
       - name: 编译 release 产物
         run: cargo build --release -p agent2api-providers
 
@@ -125,6 +139,7 @@ jobs:
       - name: 发布草稿 Release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
           # 同版本重复构建时覆盖旧草稿；已发布的同 tag 加后缀区分
@@ -136,8 +151,16 @@ jobs:
           elif [[ -n "$state" ]]; then
             TAG="$TAG-r${{ github.run_number }}"
           fi
+          # 发布说明按当前版本取，文件缺失时退回最小说明，避免版本升级后
+          # 因文件名未同步而发布失败
+          NOTES="docs/release-notes_${VERSION}.md"
+          if [[ ! -f "$NOTES" ]]; then
+            echo "::warning::未找到 $NOTES，使用最小发布说明"
+            printf '版本 %s 构建\n\n- 变更文档缺失（%s），请补充后再发布正式版\n' "$VERSION" "$NOTES" > release-notes.generated.md
+            NOTES="release-notes.generated.md"
+          fi
           gh release create "$TAG" \
             --draft \
             --title "$TAG" \
-            --notes-file docs/release-notes_3.5.0-beta.1.md \
+            --notes-file "$NOTES" \
             dist/*.zip

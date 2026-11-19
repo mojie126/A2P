@@ -68,6 +68,10 @@ pub mod astudio;
 pub mod quwork;
 #[cfg(feature = "dumate")]
 pub mod dumate;
+#[cfg(feature = "deepaicode")]
+pub mod deepaicode;
+#[cfg(feature = "codar")]
+pub mod codar;
 
 use agent2api_provider_sdk::BoxProvider;
 
@@ -196,5 +200,26 @@ pub fn registry() -> Vec<BoxProvider> {
     #[cfg(feature = "dumate")]
     list.push(Box::new(dumate::DumateProvider));
 
+    #[cfg(feature = "deepaicode")]
+    list.push(Box::new(deepaicode::DeepAiCodeProvider));
+
+    #[cfg(feature = "codar")]
+    list.push(Box::new(codar::CodarProvider));
+
     list
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_contains_new_providers() {
+        let ids: Vec<String> = registry()
+            .iter()
+            .map(|provider| provider.meta().id)
+            .collect();
+        assert!(ids.iter().any(|id| id == "deepaicode"), "缺少 DeepAI Code");
+        assert!(ids.iter().any(|id| id == "codar"), "缺少科搭");
+    }
 }

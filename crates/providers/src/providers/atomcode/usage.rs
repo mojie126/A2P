@@ -86,9 +86,12 @@ fn shown_windows(payload: &Value) -> Vec<QuotaWindow> {
     windows
 }
 
-/// 套餐名与到期文案（`codingplan_free` 块）
+/// 套餐名与到期文案（`codingplan_free` 块，缺失时回退新版 `plan` 块）
 fn plan_of(payload: &Value) -> (String, String) {
-    let plan = payload.get("codingplan_free");
+    let plan = payload
+        .get("codingplan_free")
+        .filter(|value| value.is_object())
+        .or_else(|| payload.get("plan").filter(|value| value.is_object()));
     let name = plan
         .and_then(|plan| plan.get("plan_name"))
         .and_then(Value::as_str)

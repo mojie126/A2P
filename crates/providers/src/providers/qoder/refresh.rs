@@ -67,6 +67,15 @@ pub async fn ensure_fresh(
     if !credentials.can_refresh() {
         return Err(GatewayError::with_status(400, "账号没有刷新凭证，请重新登录"));
     }
+    // 企业账号不能按个人设备凭据续期（对齐官方 wasm/qwenwork/src/refresh.rs）：
+    // 企业登录记录按完整企业身份签发，个人设备流续期会被上游拒绝或降级身份，
+    // 明确报错且不消费刷新令牌。
+    if credentials.site.is_qwenwork() && credentials.is_biz == Some(true) {
+        return Err(GatewayError::with_status(
+            409,
+            "千问办公企业身份不能按个人设备凭据续期，请更新完整企业登录记录；未消费刷新令牌",
+        ));
+    }
     // 单飞键：插件里只有一个进程、一个账号库，用站点 + 账号 + 凭证指纹
     // 就够了（网关那份还带 `store.file_string()` —— 那是「同一进程里可能开着
     // 多个账号库」才需要的维度，插件没有那个形态）。

@@ -45,6 +45,11 @@ pub struct Credentials {
     pub email: String,
     pub name: String,
     pub machine_id: String,
+    /// 企业账号标记（对齐官方 wasm/qwenwork：企业身份不能按个人设备凭据续期）
+    pub is_biz: Option<bool>,
+    /// 企业 / 组织 / 团队标识，导入时原样保留，避免企业账号降为个人身份
+    pub organization: String,
+    pub team: String,
 }
 
 impl Credentials {
@@ -94,6 +99,15 @@ impl Credentials {
             email: text(payload, &["email"]).chars().take(320).collect(),
             name: text(payload, &["nickname", "name", "username"]).chars().take(100).collect(),
             machine_id,
+            is_biz: payload
+                .get("isBiz")
+                .or_else(|| payload.get("is_biz"))
+                .and_then(Value::as_bool),
+            organization: text(payload, &["organizationId", "organization_id", "orgId", "organization"])
+                .chars()
+                .take(256)
+                .collect(),
+            team: text(payload, &["teamId", "team_id", "team"]).chars().take(256).collect(),
         };
         if parts.len() == 1 && !refresh.is_empty() {
             credentials.refresh_token =
@@ -161,7 +175,13 @@ impl Credentials {
     }
 
     /// 临期判定（窗口按**站点**选，理由见上面两个常量的说明）。
+    ///
+    /// 企业账号恒为否：它们不进个人设备流续期链路（对齐官方 `due()` 的口径），
+    /// 避免维护任务对企业账号反复触发续期报错。
     pub fn expiring(&self) -> bool {
+        if self.is_biz == Some(true) {
+            return false;
+        }
         let margin = if self.site.is_qwenwork() { QWENWORK_REFRESH_MARGIN_MS } else { REFRESH_MARGIN_MS };
         self.can_refresh() && self.expires_at.is_some_and(|expiry| expiry <= logging::now_ms() + margin)
     }
@@ -181,6 +201,9 @@ impl Credentials {
             "email": text_or_null(&self.email),
             "nickname": text_or_null(&self.name),
             "machineId": text_or_null(&self.machine_id),
+            "isBiz": self.is_biz,
+            "organizationId": text_or_null(&self.organization),
+            "teamId": text_or_null(&self.team),
         })
     }
 }

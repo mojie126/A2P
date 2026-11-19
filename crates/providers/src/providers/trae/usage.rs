@@ -999,7 +999,16 @@ pub fn document(readout: &Readout, is_cn: bool) -> Value {
     } else if summary.model == MODEL_BASIC && summary.remain_known {
         (json!(summary.remain), "额度")
     } else {
-        (Value::Null, "积分")
+        // 对齐官方 wasm/trae/src/usage.rs（d65247f）：逐包读数缺失时回退上游
+        // usage_summary 的剩余积分（本家只服务 CN，usage_summary 就是积分口径），
+        // 否则界面只能拿钱包里第一个数字（SOLO 并发数）当余额显示。
+        match readout.official {
+            Some(official) => (
+                json!(((official.total - official.consumed) * 100.0).round() / 100.0),
+                "积分",
+            ),
+            None => (Value::Null, "积分"),
+        }
     };
 
     let plan_type = readout.pay_plan_type.clone();

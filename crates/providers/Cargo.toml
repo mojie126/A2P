@@ -18,7 +18,7 @@ path = "src/main.rs"
 # 只控制「编不编进二进制」，不改变任何行为。
 [features]
 default = ["all"]
-all = ["demo", "commandcode", "modelscope", "orcaterm", "loomy", "lobsterai", "raccoon", "atomcode", "autoclaw", "officeace", "zcode", "workbuddy", "cline", "kuku", "monkeycode", "qoder", "qwenwork", "trae", "catpaw", "accio", "codearts", "antigravity", "doubaowork", "kiro", "astudio", "quwork", "dumate"]
+all = ["demo", "commandcode", "modelscope", "orcaterm", "loomy", "lobsterai", "raccoon", "atomcode", "autoclaw", "officeace", "zcode", "workbuddy", "cline", "kuku", "monkeycode", "qoder", "qwenwork", "trae", "catpaw", "accio", "codearts", "antigravity", "doubaowork", "kiro", "astudio", "quwork", "dumate", "deepaicode", "codar"]
 demo = []
 commandcode = []
 modelscope = []
@@ -46,6 +46,8 @@ kiro = []
 astudio = []
 quwork = []
 dumate = []
+deepaicode = []
+codar = []
 
 [build-dependencies]
 syn = { version = "2", features = ["full", "visit"] }

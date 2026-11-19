@@ -510,6 +510,10 @@ impl Provider for CodeArtsProvider {
     /// **注意**：CodeArts 的业务失败常常不体现在状态码上（额度耗尽是 HTTP 200
     /// SSE 里的信封），那部分由首包门 + `stream_fault` 负责；这里只管真的是
     /// 状态码的错。三条口径与参考实现一致：403 = 额度、429 = 限流、其余透传。
+    ///
+    /// 对齐官方 wasm/codearts（ab6432d）：华为网关的复合业务码末段就是真实状态码
+    /// （`InferHub.001001005.400` → 400），状态码被代理折成 502 时按它还原；
+    /// 上游业务码同时写进 `upstream_code`（可解析为整数时）与展示文案。
     fn classify(&self, status: u16, error_body: &Value) -> proto::ErrorClass {
         let raw = error_body
             .get("message")
@@ -517,26 +521,36 @@ impl Provider for CodeArtsProvider {
             .or_else(|| error_body.get("error"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        let message = format!("上游返回 {status}{}", raw_part(raw));
-        match status {
+        let code = upstream_code_text(error_body);
+        let effective = code_status(&code).unwrap_or(status);
+        let detail = if code.is_empty() {
+            raw_part(raw)
+        } else if raw.trim().is_empty() {
+            format!(": 错误码 {code}")
+        } else {
+            format!(": 错误码 {code}，{}", raw.trim())
+        };
+        let message = format!("上游返回 {effective}{detail}");
+        let upstream_code = code.parse::<i64>().ok();
+        match effective {
             403 => proto::ErrorClass::QuotaLimited {
                 reset_at: None,
                 message,
-                upstream_code: None,
-                status,
+                upstream_code,
+                status: effective,
             },
             429 => proto::ErrorClass::QuotaLimited {
                 reset_at: None,
                 message,
-                upstream_code: None,
-                status,
+                upstream_code,
+                status: effective,
             },
             // 401：临时凭据过期/被换掉 —— 刷一次再用同一账号重试
             401 => proto::ErrorClass::TokenExpired { message },
             _ => proto::ErrorClass::Fatal {
-                status,
+                status: effective,
                 message,
-                upstream_code: None,
+                upstream_code,
             },
         }
     }
@@ -869,6 +883,41 @@ fn raw_part(raw: &str) -> String {
     } else {
         format!(": {}", raw.trim())
     }
+}
+
+/// 读上游业务码：`error_code` / `providerCode` / `code`，字符串与数字都接受，
+/// 成功码（空、`0`、`0000`、`success`）不算错误。
+fn upstream_code_text(body: &Value) -> String {
+    let payload = body.get("error").filter(|error| error.is_object()).unwrap_or(body);
+    ["error_code", "providerCode", "code"]
+        .iter()
+        .find_map(|key| {
+            payload
+                .get(*key)
+                .and_then(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_string)
+                        .or_else(|| value.as_i64().map(|code| code.to_string()))
+                })
+                .map(|code| code.trim().to_string())
+        })
+        .filter(|code| {
+            !matches!(
+                code.to_ascii_lowercase().as_str(),
+                "" | "0" | "0000" | "success"
+            )
+        })
+        .unwrap_or_default()
+}
+
+/// 复合业务码末段的真实状态码：`InferHub.001001005.400` → 400。
+///
+/// `TM.00001041`、`APIG.0301` 的末段不在 4xx/5xx 内，不会被误当成状态码。
+fn code_status(code: &str) -> Option<u16> {
+    let tail = code.trim().rsplit('.').next()?;
+    let status = tail.parse::<u16>().ok()?;
+    (400..=599).contains(&status).then_some(status)
 }
 
 /// `welfare::Outcome` → `CheckinReport`。

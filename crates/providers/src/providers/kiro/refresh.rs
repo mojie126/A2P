@@ -53,6 +53,19 @@ async fn post_json(
         .await
         .map_err(|error| format!("刷新 Kiro 登录态时网络失败：{}", http::describe(&error)))?;
     let status = response.status().as_u16();
+    // 对齐官方 wasm/kiro/src/refresh.rs 的 token_response：返回网页（拦截页）
+    // 时明确报错，不落进「不是 JSON」的模糊失败。
+    if response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("text/html") || value.contains("application/xhtml+xml")
+        })
+    {
+        return Err(format!("刷新 Kiro 登录态返回了网页而非凭据响应（HTTP {status}）"));
+    }
     let text = response.text().await.unwrap_or_default();
     if !(200..300).contains(&status) {
         if matches!(status, 400 | 401 | 403) {
@@ -60,7 +73,13 @@ async fn post_json(
         }
         return Err(format!("刷新 Kiro 登录态失败（HTTP {status}）"));
     }
-    serde_json::from_str(&text).map_err(|_| "刷新 Kiro 登录态的返回不是 JSON".to_string())
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|_| "刷新 Kiro 登录态的返回不是 JSON".to_string())?;
+    // OAuth 端点可能在 200 状态里返回错误对象（{"error": …}），按失败处理。
+    if value.get("error").is_some_and(|error| !error.is_null()) {
+        return Err("Kiro 的登录态已失效，请重新登录 Kiro".to_string());
+    }
+    Ok(value)
 }
 
 async fn refresh_once(
@@ -162,16 +181,25 @@ fn apply(credentials: &mut Credentials, refreshed: Refreshed) -> Result<(), Stri
     if refreshed.access.is_empty() {
         return Err("Kiro 的登录态已失效，请重新登录 Kiro".to_string());
     }
+    if refreshed.access.chars().any(char::is_control) || refreshed.access.len() > 8192 {
+        return Err("Kiro 续期返回的访问令牌格式无效，未接受本次凭据".to_string());
+    }
+    // 对齐官方 wasm/kiro：续期返回 ksk_ 前缀说明拿到的是 API key 形态令牌
+    // 而非 OAuth 访问令牌，覆盖会把后续请求带错令牌。
+    if refreshed.access.starts_with("ksk_") {
+        return Err("Kiro 续期未返回真实访问令牌，旧凭据未覆盖".to_string());
+    }
     credentials.access = refreshed.access;
     if !refreshed.refresh.is_empty() {
+        if refreshed.refresh.chars().any(char::is_control) || refreshed.refresh.len() > 8192 {
+            return Err("Kiro 续期返回的刷新令牌格式无效，未接受本次凭据".to_string());
+        }
         credentials.refresh = refreshed.refresh;
     }
-    let seconds = if refreshed.expires_in > 0 {
-        refreshed.expires_in
-    } else {
-        3600
-    };
-    credentials.expires = now_ms() + seconds * 1000;
+    // 对齐官方 wasm/kiro/src/refresh.rs：响应未回期限就是未知（expires 保持
+    // 0，`fresh` 对 0 视为新鲜），不默认一小时，也不继承旧 token 的到期时刻。
+    let seconds = refreshed.expires_in.max(0);
+    credentials.expires = if seconds > 0 { now_ms() + seconds * 1000 } else { 0 };
     Ok(())
 }
 

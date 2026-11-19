@@ -140,14 +140,20 @@ impl Provider for DumateProvider {
     /// 动态登录方式（网关「添加账号」弹窗按它渲染）。
     fn admin_action<'a>(
         &'a self,
-        _ctx: &'a PluginCtx,
-        _account: &'a str,
+        ctx: &'a PluginCtx,
+        account: &'a str,
         action: &'a str,
-        _payload: &'a Value,
+        payload: &'a Value,
     ) -> SendFuture<'a, Value> {
         Box::pin(async move {
             match action {
                 "auth.methods" => Ok(login::login_methods()),
+                // 积分流水（charge = 收入，usage = 支出），只读
+                "usage.records" => usage::records(ctx, account, payload, false).await,
+                "usage.charge_records" => usage::records(ctx, account, payload, true).await,
+                // 成长任务与抽奖状态只读，不提交完成、不抽奖、不兑换
+                "activity.tasks" => usage::activity_tasks(ctx, account).await,
+                "activity.draw_status" => usage::activity_draw_status(ctx, account).await,
                 other => Err(agent2api_provider_sdk::unsupported(format!(
                     "百度搭子不支持管理动作「{other}」"
                 ))),
@@ -418,14 +424,15 @@ fn prepare_body(mut body: Value, wire_model: &str, qianfan: bool) -> Value {
 
 /// 下一个北京零点（毫秒时间戳），余额耗尽档的冷却终点。
 fn next_beijing_midnight() -> i64 {
-    use chrono::{Duration, FixedOffset};
-    let offset = FixedOffset::east_opt(8 * 3600).expect("固定时区偏移合法");
+    use chrono::Duration;
+    let offset = crate::beijing::offset();
     let now = chrono::DateTime::from_timestamp_millis(crate::http::now_ms())
         .unwrap_or_else(chrono::Utc::now);
     let local = now.with_timezone(&offset);
-    let tomorrow = (local.date_naive() + Duration::days(1))
-        .and_hms_opt(0, 0, 0)
-        .expect("零点合法");
+    let Some(tomorrow) = (local.date_naive() + Duration::days(1)).and_hms_opt(0, 0, 0) else {
+        // 日期运算越界（不可达）：退回一小时后，冷却仍能推进
+        return local.timestamp_millis() + Duration::hours(1).num_milliseconds();
+    };
     tomorrow
         .and_local_timezone(offset)
         .earliest()

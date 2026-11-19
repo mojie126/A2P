@@ -3,7 +3,7 @@
   "name": "提供商增强",
   "description": "为 Agent2API 扩展多家 AI 提供商，提供模型调用、账号登录与导入、凭证续期、模型目录、余额查询和签到等能力。具体功能以各提供商的支持情况为准。",
   "license": "AGPL-3.0",
-  "version": "3.5.0-beta.1",
+  "version": "3.5.0-beta.2",
   "protocol": 1,
   "providers": [
     {
@@ -220,6 +220,18 @@
       "id": "dumate",
       "label": "百度搭子",
       "order": 34,
+      "default_enabled": true
+    },
+    {
+      "id": "deepaicode",
+      "label": "DeepAI Code",
+      "order": 50,
+      "default_enabled": true
+    },
+    {
+      "id": "codar",
+      "label": "科搭",
+      "order": 51,
       "default_enabled": true
     }
   ],

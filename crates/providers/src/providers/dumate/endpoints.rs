@@ -37,6 +37,10 @@ pub const QIANFAN_CHAT_PATH: &str = "/gateway/v2/chat/completions";
 pub const TOKEN_GET_PATH: &str = "/api/dumate/app/token/get";
 
 /// 积分余额总览（含订阅与加油包明细）。
+///
+/// 刻意不带官方 WASM 的 `ignoreLoginBonus=true`：该参数会把每日登录赠送积分
+/// 从读数中扣除，但赠送积分仍可用于对话，扣除后会低估可用积分，
+/// 本家以顶层 `totalPoints - usedPoints` 展示总的可用积分。
 pub const QUOTA_OVERVIEW_PATH: &str =
     "/api/dumate/points/quota_overview?clientType=desktop&timezone=Asia%2FShanghai";
 
@@ -45,4 +49,10 @@ pub const LOGIN_BONUS_INFO_PATH: &str = "/api/dumate/points/loginBonusInfo";
 
 /// 每日签到动作。
 pub const LOGIN_BONUS_PATH: &str = "/api/dumate/points/loginBonus";
+
+/// 成长任务清单（只读）。
+pub const TASKS: &str = "/api/dumate/activity/growth-plan/tasks";
+
+/// 抽奖状态（只读）。
+pub const DRAW_STATUS: &str = "/api/dumate/activity/growth-plan/draw/status";
 

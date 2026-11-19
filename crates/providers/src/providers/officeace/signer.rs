@@ -249,7 +249,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn hmac_sha256(key: &[u8], message: &str) -> Vec<u8> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC 接受任意长度密钥");
+    // HMAC 接受任意长度密钥，构造失败不可达；按零 panic 约定返回空摘要
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(key) else {
+        return Vec::new();
+    };
     mac.update(message.as_bytes());
     mac.finalize().into_bytes().to_vec()
 }

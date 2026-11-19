@@ -821,14 +821,190 @@ fn note(frame: &Frame, telemetry: &RequestTelemetry, usage_seen: &mut Option<Val
                 .or_else(|| chunk.get("usage"))
                 .or_else(|| chunk.get("token_usage"));
             if let Some(usage) = usage {
-                *usage_seen = Some(usage.clone());
-                telemetry.report_usage(usage);
+                // 对齐官方 wasm/trae/src/stream.rs 的 `usage()`：别名键标准化后
+                // `extract_usage` 的三把键才能命中，camelCase 与 `input_tokens`
+                // 一类别名不再静默记 0，归一失败时维持原值。
+                let normalized = normalize_usage(usage).unwrap_or_else(|| usage.clone());
+                *usage_seen = Some(normalized.clone());
+                telemetry.report_usage(&normalized);
             }
         }
         Frame::Error { code, message, .. } => {
             telemetry.note_error(&format!("solo error code={code} msg={message}"));
         }
         Frame::Done => {}
+    }
+}
+
+/// 取整数字段：整数直取，浮点与数值字符串在 2^53 安全范围内转整数。
+///
+/// 对齐官方 wasm/trae/src/util.rs 的 `integer`：负值由调用方过滤。
+fn usage_integer(value: &Value) -> Option<i64> {
+    value.as_i64().or_else(|| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+            .filter(|number| number.is_finite() && number.abs() <= (1_i64 << 53) as f64)
+            .map(|number| number as i64)
+    })
+}
+
+/// 把上游多套别名键的用量投影成标准键名，别名不再静默记 0。
+///
+/// 对齐官方 wasm/trae/src/stream.rs 的 `usage()`：三层归一为白名单键直接
+/// 投影、details 块字段投影、别名组按「非零优先、零值兜底」取值；缓存命中
+/// 取多源最大值写回 `prompt_tokens_details`，`total_tokens` 至少为输入加
+/// 输出之和；一个缓存键都没有时标记 `magpie_cache_unknown`（官方键名），
+/// 由账目侧区分「无缓存」与「口径未知」。
+fn normalize_usage(raw: &Value) -> Option<Value> {
+    let value = raw
+        .get("usage")
+        .filter(|value| value.is_object())
+        .unwrap_or(raw);
+    let mut out = json!({});
+    for key in [
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "input_tokens",
+        "output_tokens",
+        "promptTokens",
+        "completionTokens",
+        "totalTokens",
+        "inputTokens",
+        "outputTokens",
+        "reasoning_tokens",
+        "cached_tokens",
+        "cache_read_input_tokens",
+        "cacheReadInputTokens",
+        "cache_creation_input_tokens",
+        "cacheCreationInputTokens",
+        "prompt_cache_hit_tokens",
+    ] {
+        if let Some(count) = usage_integer(&value[key]).filter(|count| *count >= 0) {
+            out[key] = json!(count);
+        }
+    }
+    for key in [
+        "prompt_tokens_details",
+        "completion_tokens_details",
+        "input_tokens_details",
+        "output_tokens_details",
+    ] {
+        let mut details = json!({});
+        for field in [
+            "cached_tokens",
+            "cache_write_tokens",
+            "reasoning_tokens",
+            "audio_tokens",
+            "accepted_prediction_tokens",
+            "rejected_prediction_tokens",
+        ] {
+            if let Some(count) = value
+                .get(key)
+                .and_then(|detail| detail.get(field))
+                .and_then(usage_integer)
+                .filter(|count| *count >= 0)
+            {
+                details[field] = json!(count);
+            }
+        }
+        if details.as_object().is_some_and(|fields| !fields.is_empty()) {
+            out[key] = details;
+        }
+    }
+    for (target, aliases) in [
+        (
+            "prompt_tokens",
+            ["prompt_tokens", "input_tokens", "promptTokens", "inputTokens"].as_slice(),
+        ),
+        (
+            "completion_tokens",
+            ["completion_tokens", "output_tokens", "completionTokens", "outputTokens"].as_slice(),
+        ),
+        ("total_tokens", ["total_tokens", "totalTokens"].as_slice()),
+        (
+            "cache_read_input_tokens",
+            ["cache_read_input_tokens", "cacheReadInputTokens"].as_slice(),
+        ),
+        (
+            "cache_creation_input_tokens",
+            ["cache_creation_input_tokens", "cacheCreationInputTokens"].as_slice(),
+        ),
+    ] {
+        // 别名组里出现非零值优先采用，全是零时也如实记零
+        let mut zero = None;
+        let count = aliases
+            .iter()
+            .filter_map(|key| usage_integer(&value[key]))
+            .filter(|count| *count >= 0)
+            .find(|count| {
+                if *count == 0 {
+                    zero = Some(0);
+                    false
+                } else {
+                    true
+                }
+            })
+            .or(zero);
+        if let Some(count) = count {
+            out[target] = json!(count);
+        }
+    }
+    if let Some(thought) = usage_integer(&value["reasoning_tokens"]).filter(|count| *count >= 0) {
+        if !out["completion_tokens_details"].is_object() {
+            out["completion_tokens_details"] = json!({});
+        }
+        if out["completion_tokens_details"]["reasoning_tokens"].is_null() {
+            out["completion_tokens_details"]["reasoning_tokens"] = json!(thought);
+        }
+    }
+    let read = [
+        out.pointer("/prompt_tokens_details/cached_tokens"),
+        out.pointer("/input_tokens_details/cached_tokens"),
+        out.get("cached_tokens"),
+        out.get("prompt_cache_hit_tokens"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_i64)
+    .filter(|count| *count >= 0)
+    .max();
+    if let Some(read) = read {
+        if !out["prompt_tokens_details"].is_object() {
+            out["prompt_tokens_details"] = json!({});
+        }
+        out["prompt_tokens_details"]["cached_tokens"] = json!(read);
+    }
+    if let Some((prompt, completion)) = out["prompt_tokens"]
+        .as_i64()
+        .zip(out["completion_tokens"].as_i64())
+    {
+        out["total_tokens"] = json!(out["total_tokens"]
+            .as_i64()
+            .unwrap_or(0)
+            .max(prompt.saturating_add(completion)));
+    }
+    let known = [
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "cached_tokens",
+        "prompt_cache_hit_tokens",
+    ]
+    .iter()
+    .any(|key| out.get(*key).is_some())
+        || out.pointer("/prompt_tokens_details/cached_tokens").is_some()
+        || out.pointer("/input_tokens_details/cached_tokens").is_some()
+        || out
+            .pointer("/prompt_tokens_details/cache_write_tokens")
+            .is_some();
+    if !known && out.as_object().is_some_and(|fields| !fields.is_empty()) {
+        out["magpie_cache_unknown"] = json!(true);
+    }
+    if out.as_object().is_some_and(|fields| !fields.is_empty()) {
+        Some(out)
+    } else {
+        None
     }
 }
 
