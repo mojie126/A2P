@@ -1,6 +1,6 @@
 # agent2api-providers 3.5.0-beta.2 资产草稿（fork）
 
-基于官方 3.5.0-beta.2（`694d5d9`）；以下为 fork 增量改动（官方 beta.2 对 `crates/` 的修复已逐文件吸收，WASM 架构不迁），草稿正文由此文件自动生成，同版本的多次构建在本文件整合或追加。
+基于官方 3.5.0-beta.2（`694d5d9`）；官方发布说明见 <https://github.com/ProvidersPlugin/Agent2Providers/releases/tag/v3.5.0-beta.2>，官方改动（提供商拆分 WASM 插件等）不在本文件重复列出。本文件只列 fork 相对官方版本的增量改动：本仓库维护原生插件包，`crates/` 下的实现独立演进，WASM 架构不迁。同版本的多次构建在本文件整合或追加。
 
 ## 新增
 
