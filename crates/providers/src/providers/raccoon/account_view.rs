@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use super::{credentials, jwt};
+use super::credentials;
 
 pub(super) fn account_view(secret: &Value, fallback_name: &str) -> Value {
     let desktop = secret.get("desktop").and_then(Value::as_bool) == Some(true);
@@ -35,21 +35,14 @@ pub(super) fn account_view(secret: &Value, fallback_name: &str) -> Value {
     } else {
         "小浣熊账号".to_string()
     };
-    let can_refresh = live
-        .as_ref()
-        .map(credentials::RaccoonCredentials::can_refresh)
-        .unwrap_or_else(|| {
-            !desktop
-                && !jwt::is_iam_token(token)
-                && !crate::store::pick(secret, &["refreshToken", "refresh_token"]).is_empty()
-        });
+    // 上游已无旧版刷新接口，公开视图不再申报「可续期」；界面据此隐藏刷新入口
     let mut view = json!({
         "name": name,
         "uid": user_id,
         "userId": user_id,
         "tokenTail": crate::store::token_tail(token),
         "hasSession": !token.is_empty(),
-        "canRefresh": can_refresh,
+        "canRefresh": false,
     });
     let expiry = live
         .as_ref()

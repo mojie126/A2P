@@ -224,7 +224,6 @@ pub async fn exchange_code(
             .unwrap_or_default()
     };
     let access_token = text_of("access_token");
-    let refresh_token = text_of("refresh_token");
     let upstream_code = payload.get("code").and_then(Value::as_i64);
     if upstream_code == Some(CODE_EXPIRED) {
         return Err(
@@ -232,11 +231,12 @@ pub async fn exchange_code(
                 .with_optional_code(upstream_code),
         );
     }
+    // 刷新令牌不再读取也不作为校验条件：上游已无旧版刷新接口，IAM 迁移后
+    // 授权码换出的就是一枚 IAM 访问令牌，续期只能靠重新登录
     let iam = super::jwt::is_iam_token(&access_token);
     if !response.ok
         || upstream_code != Some(0)
         || access_token.is_empty()
-        || (!iam && refresh_token.is_empty())
     {
         let message = payload
             .get("message")
@@ -285,9 +285,6 @@ pub async fn exchange_code(
         "accessToken".to_string(),
         Value::String(access_token.clone()),
     );
-    if !iam {
-        secret.insert("refreshToken".to_string(), Value::String(refresh_token));
-    }
     secret.insert("userId".to_string(), Value::String(user_id.clone()));
     if let Some(expires_at) = super::jwt::jwt_expiry_ms(&access_token) {
         secret.insert("expiresAt".to_string(), Value::from(expires_at));

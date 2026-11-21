@@ -294,6 +294,12 @@ pub struct ApiResponse {
 /// `reqwest::Error` 好判 `is_timeout()`。所以这里原样复刻那个签名。
 ///
 /// `proxy` 为 `None` 时继承当前账号操作的出口；没有账号上下文时才直连。
+///
+/// ── `None` 的出口解析顺序（通用能力）───────────────────────
+/// 显式代理参数（登录载荷 / 账号记录带来的）优先，其次当前账号操作绑定的
+/// 出口（`egress::current()`，覆盖转发、余额、签到、登录换码等全部网络方法），
+/// 都没有才直连。此前 `None` 恒直连，让「设了代理但还是超时」的静默失效
+/// 蔓延到所有走 `send_raw` 的控制面请求 —— 现在统一出口解析，不再各写一份。
 pub async fn send_raw(
     method: &str,
     url: &str,
@@ -302,11 +308,9 @@ pub async fn send_raw(
     proxy: Option<&proto::WireProxy>,
     timeout_ms: Option<u64>,
 ) -> Result<ApiResponse, reqwest::Error> {
-    let client = match proxy {
-        Some(proxy) => control_client(Some(proxy), ""),
-        // `direct` 是显式直连，不跟随系统代理。
-        None => control_client(None, "direct"),
-    };
+    // 统一走 `control_client` 的出口解析：显式参数 → 账号绑定出口 → 直连。
+    // 传空 `gateway_proxy` 表示「无默认出口」—— 解析不到任何出口时就是直连。
+    let client = control_client(proxy, "");
     let mut builder = match method {
         "POST" => client.post(url),
         "PUT" => client.put(url),

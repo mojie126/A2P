@@ -22,7 +22,6 @@ pub mod models;
 pub mod oauth;
 pub mod onboarding;
 mod reasoning;
-mod refresh_api;
 mod upstream_errors;
 
 use agent2api_provider_protocol as proto;
@@ -50,8 +49,9 @@ impl Provider for RaccoonProvider {
             .with_capabilities(proto::Capabilities {
                 chat: true,
                 stateful: false,
-                // POST {authBase}/refresh
-                refresh: true,
+                // 上游已无旧版刷新接口（IAM 迁移后 `/refresh` 下线），
+                // 不再申报主动续期能力；批量维护据此跳过本家
+                refresh: false,
                 // GET {llmBase}/model_catalog
                 model_refresh: true,
                 usage: true,
@@ -237,15 +237,16 @@ impl Provider for RaccoonProvider {
         })
     }
 
-    /// 401（token 被上游拒绝）后的**强制**刷新：不看临期窗口，直接续期。
+    /// 401（token 被上游拒绝）后的**强制**重读：不看临期窗口，直接重读登录态。
     ///
-    /// 为什么必须覆盖默认实现：`ensure_token` 只在「临期」时刷新，而 401
-    /// 完全可能发生在一个时间上还很新的 token 上（服务端侧失效、账号被顶下线、
-    /// refreshToken 轮换）。此时只调 ensure 会拿回同一个被拒的 token。
+    /// 为什么必须覆盖默认实现：`ensure_token` 只在「临期」时重读，而 401
+    /// 完全可能发生在一个时间上还很新的 token 上（服务端侧失效、账号被顶下线）。
+    /// 此时只调 ensure 会拿回同一个被拒的 token；上游已无旧版刷新接口，
+    /// 重读是唯一可能换到新凭证的动作（客户端重新登录后生效）。
     fn refresh_token<'a>(&'a self, ctx: &'a PluginCtx, account: &'a str) -> SendFuture<'a, String> {
         Box::pin(async move {
             if account.is_empty() && env_access_token().is_some() {
-                // 环境变量凭证是静态的，没有可续期的来源
+                // 环境变量凭证是静态的，没有可重读的来源
                 return Err(GatewayError::with_status(
                     401,
                     "环境变量凭证（RACCOON_TOKEN）无法续期，请改用账号列表添加账号",
@@ -262,25 +263,11 @@ impl Provider for RaccoonProvider {
         })
     }
 
-    /// 临期判定：取该账号的凭证快照，用凭证自己的 `is_expiring()`（5 分钟窗口）
-    /// 与 `can_refresh()` 判一次。
-    ///
-    /// 先确认记录存在：`snapshot` 在记录缺失时会回落到桌面端登录态，而
-    /// 「账号已被删除」不该被回答成「需要刷新」（维护任务随后会拿这个不存在的
-    /// id 去刷新）。
-    fn token_expiring<'a>(&'a self, ctx: &'a PluginCtx, account: &'a str) -> SendFuture<'a, bool> {
-        Box::pin(async move {
-            if account.is_empty() {
-                return Ok(false);
-            }
-            if crate::store::record(ctx, ID, account).await.is_err() {
-                return Ok(false);
-            }
-            match credentials::snapshot(ctx, account).await {
-                Ok(credentials) => Ok(credentials.can_refresh() && credentials.is_expiring()),
-                Err(_) => Ok(false),
-            }
-        })
+    /// 临期判定恒为 false：上游已无旧版刷新接口，凭证不再有「主动续期」这条
+    /// 路径 —— 批量维护不应把小浣熊账号点名去刷（刷了也只是重读一遍登录态）。
+    /// 转发链路的临期重读由 `ensure_token` 自行处理，不经过这个判定。
+    fn token_expiring<'a>(&'a self, _ctx: &'a PluginCtx, _account: &'a str) -> SendFuture<'a, bool> {
+        Box::pin(async { Ok(false) })
     }
 
     // ── 目录 / 余额 / 签到 / 领取 ──────────────────────────────
@@ -760,8 +747,8 @@ fn normalize(input: proto::NormalizeInput) -> Result<proto::NormalizedAccount, G
 
 /// 从一份 JSON 载荷里解析账号（手填与文件导入共用）。
 ///
-/// 兼容两种形态：嵌套的 auth.json（`access_token` / `refresh_token` 那套）与
-/// 用户直接粘的一串 JWT。
+/// 兼容两种形态：嵌套的 auth.json（`access_token` 那套）与用户直接粘的一串 JWT。
+/// 载荷里的刷新令牌不再读取 —— 上游已无旧版刷新接口。
 fn from_payload(
     payload: &Value,
     explicit_name: Option<&str>,
@@ -769,7 +756,7 @@ fn from_payload(
     // 直接粘 JWT：整串当一个 token 处理
     let raw_token = payload.as_str().map(str::trim).unwrap_or("");
     if !raw_token.is_empty() {
-        return from_token(raw_token, "", explicit_name);
+        return from_token(raw_token, explicit_name);
     }
     let pick = |keys: &[&str]| -> String {
         for key in keys {
@@ -791,9 +778,8 @@ fn from_payload(
             "缺少 token（accessToken / access_token）",
         ));
     }
-    let refresh_token = pick(&["refreshToken", "refresh_token"]);
-    from_token(&token, &refresh_token, explicit_name).map(|mut account| {
-        // office_* 三件套原样保留（续期与展示都要它们）
+    from_token(&token, explicit_name).map(|mut account| {
+        // office_* 三件套原样保留（展示都要它们）
         if let Some(object) = account.secret.as_object_mut() {
             for (target, keys) in [
                 ("officeIdentity", &["officeIdentity", "office_identity"][..]),
@@ -819,9 +805,11 @@ fn from_payload(
 }
 
 /// 从一枚 JWT 造账号（**必须**是有效 JWT：userId 与过期时刻都从它读）。
+///
+/// 刷新令牌不再落库：上游已无旧版刷新接口，残留的刷新令牌没有续期入口，
+/// 落进 secret 只会让人误以为还能续期。
 fn from_token(
     token: &str,
-    refresh_token: &str,
     explicit_name: Option<&str>,
 ) -> Result<proto::NormalizedAccount, GatewayError> {
     let token = jwt::strip_bearer(token);
@@ -843,9 +831,6 @@ fn from_token(
         "accessToken": token.clone(),
         "userId": user_id,
     });
-    if !refresh_token.trim().is_empty() && !jwt::is_iam_token(&token) {
-        secret["refreshToken"] = Value::String(jwt::strip_bearer(refresh_token));
-    }
     if let Some(expires_at) = jwt::jwt_expiry_ms(&token) {
         secret["expiresAt"] = Value::from(expires_at);
     }
@@ -901,7 +886,8 @@ mod login_tests {
         assert_eq!(list[0]["desktopOnly"], json!(true));
     }
 
-    /// 动态登录方式提交的是 `{methodIndex, inputs}`，令牌字段要能解析出来
+    /// 动态登录方式提交的是 `{methodIndex, inputs}`，令牌字段要能解析出来；
+    /// 载荷里的刷新令牌不再落库（上游已无旧版刷新接口）
     #[test]
     fn manual_inputs_are_unwrapped() {
         let token = jwt_with(json!({ "sub": "user-1", "name": "测试账号", "exp": 4_102_444_800i64 }));
@@ -919,13 +905,13 @@ mod login_tests {
         })
         .expect("应当归一成功");
         assert_eq!(account.secret["accessToken"], json!(token));
-        assert_eq!(account.secret["refreshToken"], json!("refresh-1"));
+        assert_eq!(account.secret.get("refreshToken"), None);
         assert_eq!(account.secret["officeIdentity"], json!("personal"));
         assert_eq!(account.identity, "user-user-1");
     }
 
     /// 「导入登录态 JSON」把整份 auth.json 当文本提交，要按 JSON 解析，
-    /// 而不是当成裸 JWT
+    /// 而不是当成裸 JWT；刷新令牌同样不落库
     #[test]
     fn credential_json_is_parsed() {
         let token = jwt_with(json!({ "sub": "abc123", "name": "导入账号", "exp": 4_102_444_800i64 }));
@@ -940,7 +926,7 @@ mod login_tests {
         })
         .expect("应当归一成功");
         assert_eq!(account.secret["accessToken"], json!(token));
-        assert_eq!(account.secret["refreshToken"], json!("r2"));
+        assert_eq!(account.secret.get("refreshToken"), None);
         assert_eq!(account.secret["officeIdentity"], json!("org"));
     }
 

@@ -107,6 +107,10 @@ pub(crate) async fn for_request(
         | methods::TOKEN_REFRESH | methods::MODELS_REFRESH
         | methods::USAGE_QUERY | methods::CHECKIN_CLAIM | methods::CLAIM
         | methods::CLAIM_STATUS | crate::images::GENERATE_METHOD | crate::images::EDIT_METHOD
+        // 登录三方法：换码与轮询要出网，全程沿用登录弹窗选定的出口
+        // （login.start 的 params.proxy 由网关在发起时放入，poll/callback 由
+        // 网关的登录任务链路透传）
+        | methods::LOGIN_START | methods::LOGIN_POLL | methods::LOGIN_CALLBACK
     ) || (method == methods::ADMIN_ACTION && !account.is_empty());
     if !network {
         return Ok(None);
