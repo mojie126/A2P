@@ -17,6 +17,7 @@ mod iam;
 mod image_generation;
 mod image_size;
 pub mod jwt;
+mod login;
 pub mod models;
 pub mod oauth;
 pub mod onboarding;
@@ -432,16 +433,55 @@ impl Provider for RaccoonProvider {
         Ok(identity_of(secret))
     }
 
+    // ── 管理动作 ──────────────────────────────────────────────
+
+    /// 登录方式清单（`auth.methods`）
+    ///
+    /// 网关对原生插件不再回退旧版静态入口，不实现这个动作就会出现「该提供商
+    /// 未声明动态登录方式」；其余管理动作没有实现，保持 501 语义
+    fn admin_action<'a>(
+        &'a self,
+        _ctx: &'a PluginCtx,
+        _account: &'a str,
+        action: &'a str,
+        _payload: &'a Value,
+    ) -> SendFuture<'a, Value> {
+        Box::pin(async move {
+            match action {
+                "auth.methods" => Ok(login::methods()),
+                other => Err(agent2api_provider_sdk::unsupported(format!(
+                    "小浣熊不支持管理动作「{other}」"
+                ))),
+            }
+        })
+    }
+
     // ── 登录 ──────────────────────────────────────────────────
 
-    /// 授权地址（`office-raccoon://` 回调型）。
+    /// 授权地址（`office-raccoon://` 回调型）或本机登录态读取
     fn login_start<'a>(
         &'a self,
         _ctx: &'a PluginCtx,
         method: &'a str,
-        _payload: &'a Value,
+        payload: &'a Value,
     ) -> SendFuture<'a, proto::LoginStart> {
         Box::pin(async move {
+            let index = payload.get("methodIndex").and_then(Value::as_u64);
+            // 3 = 读取本机客户端登录态，点一下直接完成（不需要打开任何页面）
+            if index == Some(3) {
+                let proxy = payload
+                    .get("proxy")
+                    .filter(|value| !value.is_null())
+                    .and_then(|value| serde_json::from_value::<proto::WireProxy>(value.clone()).ok());
+                let normalized = normalize(proto::NormalizeInput {
+                    provider: ID.to_string(),
+                    source: proto::NormalizeSource::Desktop,
+                    name: None,
+                    proxy,
+                })
+                .map_err(GatewayError::into_message);
+                return Ok(login::start_desktop_flow(normalized));
+            }
             if method != "browser" && !method.is_empty() {
                 return Err(format!("小浣熊不支持这种登录方式：{method}"));
             }
@@ -451,9 +491,31 @@ impl Provider for RaccoonProvider {
                 url: oauth::build_authorize_url(&state),
                 instructions: "在打开的页面里完成登录，成功后会自动回到应用".to_string(),
                 poll_interval_ms: 0,
-                external_browser: true,
-                allowed_hosts: vec!["xiaohuanxiong.com".to_string()],
+                // 回调是自定义协议，只有应用内窗口能接住；系统浏览器需要系统
+                // 注册 office-raccoon://（装了官方客户端才有），不能对外部模式
+                // 宣称可用
+                external_browser: false,
+                allowed_hosts: login::BROWSER_ALLOWED_HOSTS
+                    .iter()
+                    .map(|host| (*host).to_string())
+                    .collect(),
             })
+        })
+    }
+
+    /// 本机登录态读取的轮询（读文件是即时动作，第一拍就能拿到结果）
+    fn login_poll<'a>(
+        &'a self,
+        _ctx: &'a PluginCtx,
+        flow: &'a str,
+    ) -> SendFuture<'a, proto::LoginPoll> {
+        Box::pin(async move { Ok(login::poll(flow)) })
+    }
+
+    fn login_cancel<'a>(&'a self, _ctx: &'a PluginCtx, flow: &'a str) -> SendFuture<'a, ()> {
+        Box::pin(async move {
+            login::cancel(flow);
+            Ok(())
         })
     }
 
@@ -658,7 +720,27 @@ fn normalize(input: proto::NormalizeInput) -> Result<proto::NormalizedAccount, G
                 desktop: true,
             })
         }
-        proto::NormalizeSource::Manual { payload } => from_payload(&payload, input.name.as_deref()),
+        proto::NormalizeSource::Manual { payload } => {
+            // 动态登录方式提交的形状是 `{methodIndex, inputs:{…}}`；旧入口把
+            // 字段直接放在顶层，两种都要认
+            let fields = payload
+                .get("inputs")
+                .filter(|value| value.is_object())
+                .unwrap_or(&payload);
+            // 「导入登录态 JSON」把整份 auth.json 当一段文本提交，优先按 JSON 解析
+            if let Some(text) = fields
+                .get("credentialJson")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                let parsed: Value = serde_json::from_str(text).map_err(|_| {
+                    GatewayError::with_status(400, "登录态 JSON 不是合法 JSON，请粘贴 auth.json 的完整内容")
+                })?;
+                return from_payload(&parsed, input.name.as_deref());
+            }
+            from_payload(fields, input.name.as_deref())
+        }
         proto::NormalizeSource::FileText { content, file_name } => {
             let parsed: Value = serde_json::from_str(&content).map_err(|_| {
                 let label = file_name.unwrap_or_else(|| "凭证文件".to_string());
@@ -787,4 +869,108 @@ fn from_token(
         identity: format!("user-{user_id}"),
         desktop: false,
     })
+}
+
+#[cfg(test)]
+mod login_tests {
+    use agent2api_provider_protocol as proto;
+    use serde_json::json;
+
+    use super::{login, normalize};
+
+    /// 一段未签名的 JWT：解码只看 payload，签名由上游校验
+    fn jwt_with(claims: serde_json::Value) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+        format!("eyJhbGciOiJub25lIn0.{payload}.sig")
+    }
+
+    /// 四种登录方式都要申报，索引不重复，且只有一条本机读取
+    #[test]
+    fn methods_cover_the_declared_entries() {
+        let methods = login::methods();
+        let list = methods["methods"].as_array().expect("methods 必须是数组");
+        let indices: Vec<u64> = list.iter().filter_map(|item| item["methodIndex"].as_u64()).collect();
+        assert_eq!(indices, vec![0, 1, 2, 3]);
+        let local: Vec<&serde_json::Value> = list.iter().filter(|item| item["localOnly"] == true).collect();
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0]["type"], json!("oauth"));
+        // 网页登录必须是应用内窗口：自定义协议回调交给壳侧捕获
+        assert_eq!(list[0]["embeddedOnly"], json!(true));
+        assert_eq!(list[0]["desktopOnly"], json!(true));
+    }
+
+    /// 动态登录方式提交的是 `{methodIndex, inputs}`，令牌字段要能解析出来
+    #[test]
+    fn manual_inputs_are_unwrapped() {
+        let token = jwt_with(json!({ "sub": "user-1", "name": "测试账号", "exp": 4_102_444_800i64 }));
+        let account = normalize(proto::NormalizeInput {
+            provider: "raccoon".to_string(),
+            source: proto::NormalizeSource::Manual {
+                payload: json!({ "methodIndex": 1, "inputs": {
+                    "accessToken": token,
+                    "refreshToken": "refresh-1",
+                    "officeIdentity": "personal",
+                }}),
+            },
+            name: None,
+            proxy: None,
+        })
+        .expect("应当归一成功");
+        assert_eq!(account.secret["accessToken"], json!(token));
+        assert_eq!(account.secret["refreshToken"], json!("refresh-1"));
+        assert_eq!(account.secret["officeIdentity"], json!("personal"));
+        assert_eq!(account.identity, "user-user-1");
+    }
+
+    /// 「导入登录态 JSON」把整份 auth.json 当文本提交，要按 JSON 解析，
+    /// 而不是当成裸 JWT
+    #[test]
+    fn credential_json_is_parsed() {
+        let token = jwt_with(json!({ "sub": "abc123", "name": "导入账号", "exp": 4_102_444_800i64 }));
+        let raw = json!({ "access_token": token, "refresh_token": "r2", "office_identity": "org" });
+        let account = normalize(proto::NormalizeInput {
+            provider: "raccoon".to_string(),
+            source: proto::NormalizeSource::Manual {
+                payload: json!({ "methodIndex": 2, "inputs": { "credentialJson": raw.to_string() } }),
+            },
+            name: None,
+            proxy: None,
+        })
+        .expect("应当归一成功");
+        assert_eq!(account.secret["accessToken"], json!(token));
+        assert_eq!(account.secret["refreshToken"], json!("r2"));
+        assert_eq!(account.secret["officeIdentity"], json!("org"));
+    }
+
+    /// 非法 JSON 必须报错，不能把它当令牌存下去
+    #[test]
+    fn invalid_credential_json_is_rejected() {
+        let error = normalize(proto::NormalizeInput {
+            provider: "raccoon".to_string(),
+            source: proto::NormalizeSource::Manual {
+                payload: json!({ "methodIndex": 2, "inputs": { "credentialJson": "{not-json" } }),
+            },
+            name: None,
+            proxy: None,
+        })
+        .expect_err("非法 JSON 必须被拒绝");
+        assert!(error.message.contains("登录态 JSON"));
+    }
+
+    /// 本机流程只有一次读取机会：拿到 Done 之后过期或取消都要变成失败
+    #[test]
+    fn desktop_flow_is_one_shot() {
+        let start = login::start_desktop_flow(Err("没有本机登录态".to_string()));
+        assert!(!start.flow.is_empty());
+        assert!(start.url.is_empty());
+        assert!(start.poll_interval_ms > 0);
+        match login::poll(&start.flow) {
+            proto::LoginPoll::Failed { message } => assert!(message.contains("没有本机登录态")),
+            _ => panic!("应当返回失败"),
+        }
+        login::cancel(&start.flow);
+        assert!(matches!(login::poll(&start.flow), proto::LoginPoll::Failed { .. }));
+    }
 }

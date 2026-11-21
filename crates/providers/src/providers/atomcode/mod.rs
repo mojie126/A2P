@@ -79,6 +79,31 @@ pub fn model_count() -> usize {
 pub struct AtomcodeProvider;
 
 impl Provider for AtomcodeProvider {
+
+    fn admin_action<'a>(
+        &'a self,
+        _ctx: &'a agent2api_provider_sdk::PluginCtx,
+        _account: &'a str,
+        action: &'a str,
+        _payload: &'a serde_json::Value,
+    ) -> agent2api_provider_sdk::SendFuture<'a, serde_json::Value> {
+        Box::pin(async move {
+            match action {
+                "auth.methods" => Ok(crate::providers::auth_methods::from_static(
+                    &self.meta(),
+                    &crate::providers::auth_methods::Options {
+                        primary: "accessToken",
+                        embedded_browser: false,
+                        manual_callback: false,
+                    },
+                )),
+                other => Err(agent2api_provider_sdk::unsupported(format!(
+                    "该提供商不支持管理动作「{other}」"
+                ))),
+            }
+        })
+    }
+
     fn meta(&self) -> ProviderMeta {
         ProviderMeta::new(ID, "AtomCode")
             .with_capabilities(proto::Capabilities {
@@ -107,12 +132,22 @@ impl Provider for AtomcodeProvider {
                 // 本家有没有环境变量 / 默认登录态旁路（协议新增位）
                 env_credentials: false,
             })
-            .with_login(vec![proto::LoginMethod::Browser {
-                button: "浏览器登录".into(),
-                hint: Some(
-                    "在打开的 AtomGit 授权页完成登录；完成后回到这里等待几秒即可".into(),
-                ),
-            }])
+            .with_login(vec![
+                proto::LoginMethod::Browser {
+                    button: "浏览器登录".into(),
+                    hint: Some(
+                        "在打开的 AtomGit 授权页完成登录；完成后回到这里等待几秒即可".into(),
+                    ),
+                },
+                proto::LoginMethod::Token {
+                    label: "访问令牌".into(),
+                    placeholder: "粘贴 accessToken（可同时填写 refreshToken）".into(),
+                    extra_fields: vec![
+                        proto::LoginField { key: "refreshToken".into(), label: "续期令牌".into(), placeholder: "强烈建议填写，未填时无法自动续期".into(), optional: true, multiline: false },
+                        proto::LoginField { key: "userId".into(), label: "用户 ID".into(), placeholder: "可选，用于生成账号标识".into(), optional: true, multiline: false },
+                    ],
+                },
+            ])
             // 本家**没有内置兜底清单**（名单里写死的模型点一下可能是「参数错误」，
             // 见 `models.rs` 的模块头），所以默认清单为空 —— 由远程目录填。
             .with_models(Vec::new())

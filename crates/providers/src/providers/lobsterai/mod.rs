@@ -70,6 +70,31 @@ pub const ID: &str = "lobsterai";
 pub struct LobsterAiProvider;
 
 impl Provider for LobsterAiProvider {
+
+    fn admin_action<'a>(
+        &'a self,
+        _ctx: &'a agent2api_provider_sdk::PluginCtx,
+        _account: &'a str,
+        action: &'a str,
+        _payload: &'a serde_json::Value,
+    ) -> agent2api_provider_sdk::SendFuture<'a, serde_json::Value> {
+        Box::pin(async move {
+            match action {
+                "auth.methods" => Ok(crate::providers::auth_methods::from_static(
+                    &self.meta(),
+                    &crate::providers::auth_methods::Options {
+                        primary: "token",
+                        embedded_browser: false,
+                        manual_callback: false,
+                    },
+                )),
+                other => Err(agent2api_provider_sdk::unsupported(format!(
+                    "该提供商不支持管理动作「{other}」"
+                ))),
+            }
+        })
+    }
+
     fn meta(&self) -> ProviderMeta {
         ProviderMeta::new(ID, "LobsterAI")
             .with_capabilities(proto::Capabilities {

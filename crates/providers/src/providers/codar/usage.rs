@@ -3,6 +3,9 @@
 //! 上游口径（官方插件实测）：通用点数走 `POST /v1/gettoken`（body 带用户名），
 //! Agent 点数在同一条响应或 `POST /v1/agent/balance` 里，改写点数为附加项。
 //! 读不到的项留空，不填 0。
+//!
+//! 剩余为 0 的点数包整个不输出（与百度搭子同一口径：用完的包不在任何地方展示，
+//! 含额度详情），只剩有效包参与窗口列表。
 
 use serde_json::{json, Value};
 
@@ -100,19 +103,18 @@ async fn points(
     Ok(points)
 }
 
-pub async fn query(ctx: &PluginCtx, account: &str) -> Result<proto::UsageReport, String> {
-    let credentials = refresh::ensure(ctx, account, false)
-        .await
-        .map_err(|error| error.message)?;
-    let proxy = client::account_proxy(ctx, account).await;
-    let points = points(&credentials.access_token, &credentials.username, proxy.as_ref(), &ctx.env.proxy).await?;
+/// 三条点数读数翻成窗口行：剩余为 0 的整条不输出。
+///
+/// 0 点与「没有这一项」对用户是同一件事，列出来只会让「通用 / Agent / 改写」
+/// 三行里混进一条花不出去的读数（与百度搭子 `package_windows` 同一口径）。
+fn point_windows(points: &Points) -> Vec<Value> {
     let mut windows = Vec::new();
     for (id, name, value, aside) in [
         ("general", "通用点数", points.general, false),
         ("agent", "Agent 点数", points.agent, false),
         ("rewrite", "改写点数", points.rewrite, true),
     ] {
-        let Some(balance) = value else { continue };
+        let Some(balance) = value.filter(|balance| *balance > 0.0) else { continue };
         windows.push(json!({
             "id": id,
             "name": name,
@@ -124,18 +126,83 @@ pub async fn query(ctx: &PluginCtx, account: &str) -> Result<proto::UsageReport,
             "aside": aside,
         }));
     }
+    windows
+}
+
+/// 顶层余额只取通用点数的正剩余。
+///
+/// 写 0 会让组头「可用合计」与账号行余额列把这家读成「余额为零」，
+/// 而实际含义只是「通用点数这一项用完了」。
+fn top_balance(points: &Points) -> Option<f64> {
+    points.general.filter(|value| *value > 0.0)
+}
+
+pub async fn query(ctx: &PluginCtx, account: &str) -> Result<proto::UsageReport, String> {
+    let credentials = refresh::ensure(ctx, account, false)
+        .await
+        .map_err(|error| error.message)?;
+    let proxy = client::account_proxy(ctx, account).await;
+    let points = points(&credentials.access_token, &credentials.username, proxy.as_ref(), &ctx.env.proxy).await?;
     let mut report = json!({
         "provider": PROVIDER_ID,
         "unit": "点",
         "plan": "科搭点数账户",
         "user": credentials.username,
-        "windows": windows,
+        "windows": point_windows(&points),
         "message": "通用、Agent 与改写点数分别展示，不把活动免费期当成现金余额",
     });
-    if let Some(general) = points.general {
+    if let Some(general) = top_balance(&points) {
         report["balance"] = json!(general);
         report["totalLeft"] = json!(general);
         report["available"] = json!(general);
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{point_windows, top_balance, Points};
+
+    /// 剩余为 0 的点数包既不进窗口行，也不写进顶层余额。
+    ///
+    /// 实测形态（截图）：通用 500、Agent 2000、改写 0 —— 改写那一行必须在
+    /// 额度详情里整个消失，而顶层「可用合计」取通用点数的 500。
+    #[test]
+    fn zero_packs_are_omitted() {
+        let points = Points { general: Some(500.0), agent: Some(2000.0), rewrite: Some(0.0) };
+        let windows = point_windows(&points);
+        let ids: Vec<&str> = windows.iter().filter_map(|row| row["id"].as_str()).collect();
+        assert_eq!(ids, vec!["general", "agent"]);
+        assert_eq!(top_balance(&points), Some(500.0));
+    }
+
+    /// 通用点数用尽时不给顶层余额，避免组头读成「余额为零」。
+    #[test]
+    fn drained_general_leaves_no_top_balance() {
+        let points = Points { general: Some(0.0), agent: Some(2000.0), rewrite: None };
+        let windows = point_windows(&points);
+        let ids: Vec<&str> = windows.iter().filter_map(|row| row["id"].as_str()).collect();
+        assert_eq!(ids, vec!["agent"]);
+        assert_eq!(top_balance(&points), None);
+    }
+
+    /// 三条都读不到时窗口为空，顶层余额也不凭空补 0。
+    #[test]
+    fn all_missing_produces_empty_windows() {
+        let points = Points { general: None, agent: None, rewrite: None };
+        assert!(point_windows(&points).is_empty());
+        assert_eq!(top_balance(&points), None);
+    }
+
+    /// 窗口行保留既有字段形状：单位「点」、改写点数属附加项（aside）。
+    #[test]
+    fn window_shape_stays_stable() {
+        let points = Points { general: Some(1.5), agent: None, rewrite: Some(3.0) };
+        let windows = point_windows(&points);
+        assert_eq!(windows[0]["unit"], json!("点"));
+        assert_eq!(windows[0]["display"], json!("1.50"));
+        assert_eq!(windows[1]["aside"], json!(true));
+    }
 }

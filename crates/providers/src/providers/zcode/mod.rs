@@ -197,10 +197,21 @@ impl Provider for ZcodeProvider {
                 // 本家有没有环境变量 / 默认登录态旁路（协议新增位）
                 env_credentials: false,
             })
-            .with_login(vec![proto::LoginMethod::Browser {
-                button: "网页登录".to_string(),
-                hint: Some("打开 ZCode 授权页，完成后自动收下账号".to_string()),
-            }])
+            .with_login(vec![
+                proto::LoginMethod::Browser {
+                    button: "网页登录".to_string(),
+                    hint: Some("打开 ZCode 授权页，完成后自动收下账号".to_string()),
+                },
+                proto::LoginMethod::Token {
+                    label: "访问令牌 / JWT".to_string(),
+                    placeholder: "粘贴 accessToken、Start Plan JWT 或整份凭据 JSON".to_string(),
+                    extra_fields: vec![
+                        proto::LoginField { key: "jwt".into(), label: "Start Plan JWT".into(), placeholder: "套餐池使用时填写".into(), optional: true, multiline: false },
+                        proto::LoginField { key: "userId".into(), label: "用户 ID".into(), placeholder: "旧凭据可不填".into(), optional: true, multiline: false },
+                        proto::LoginField { key: "deviceMid".into(), label: "设备 UUID".into(), placeholder: "可选".into(), optional: true, multiline: false },
+                    ],
+                },
+            ])
             .with_models(models::list(self.region))
             // 活动套餐通道的人机验证令牌池：池子本体在本模块（`captcha`），
             // 界面只负责铸令牌并推进来
@@ -639,6 +650,16 @@ impl Provider for ZcodeProvider {
         payload: &'a Value,
     ) -> SendFuture<'a, Value> {
         Box::pin(async move {
+            if action == "auth.methods" {
+                return Ok(crate::providers::auth_methods::from_static(
+                    &self.meta(),
+                    &crate::providers::auth_methods::Options {
+                        primary: "accessToken",
+                        embedded_browser: false,
+                        manual_callback: false,
+                    },
+                ));
+            }
             if let Some(outcome) = admin::machine_action(action, payload) {
                 if !action.starts_with("claim.verification.") {
                     claim::refresh_app_version_override(ctx).await;

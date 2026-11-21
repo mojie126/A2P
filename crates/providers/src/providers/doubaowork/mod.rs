@@ -28,6 +28,31 @@ pub const PROVIDER_ID: &str = "doubaowork";
 pub struct DoubaoWorkProvider;
 
 impl Provider for DoubaoWorkProvider {
+
+    fn admin_action<'a>(
+        &'a self,
+        _ctx: &'a agent2api_provider_sdk::PluginCtx,
+        _account: &'a str,
+        action: &'a str,
+        _payload: &'a serde_json::Value,
+    ) -> agent2api_provider_sdk::SendFuture<'a, serde_json::Value> {
+        Box::pin(async move {
+            match action {
+                "auth.methods" => Ok(crate::providers::auth_methods::from_static(
+                    &self.meta(),
+                    &crate::providers::auth_methods::Options {
+                        primary: "cookie",
+                        embedded_browser: true,
+                        manual_callback: true,
+                    },
+                )),
+                other => Err(agent2api_provider_sdk::unsupported(format!(
+                    "该提供商不支持管理动作「{other}」"
+                ))),
+            }
+        })
+    }
+
     fn meta(&self) -> ProviderMeta {
         let mut meta = ProviderMeta::new(PROVIDER_ID, "豆包工作")
             .with_capabilities(proto::Capabilities {
@@ -39,7 +64,12 @@ impl Provider for DoubaoWorkProvider {
                     button: "网页登录".into(), hint: Some("在官方页面登录，成功后自动保存完整 Cookie；网页面板可粘贴 Cookie。".into()),
                 },
                 proto::LoginMethod::Token {
-                    label: "Cookie".into(), placeholder: "sessionid=…; sessionid_ss=…（或 Cookie JSON）".into(), extra_fields: vec![],
+                    label: "Cookie".into(), placeholder: "sessionid=…; sessionid_ss=…（或 Cookie JSON）".into(),
+                    extra_fields: vec![
+                        proto::LoginField { key: "deviceId".into(), label: "deviceId".into(), placeholder: "完整 JSON 已包含时无需填写".into(), optional: true, multiline: false },
+                        proto::LoginField { key: "webId".into(), label: "webId".into(), placeholder: "".into(), optional: true, multiline: false },
+                        proto::LoginField { key: "clientVersion".into(), label: "客户端版本".into(), placeholder: "".into(), optional: true, multiline: false },
+                    ],
                 },
                 proto::LoginMethod::Desktop {
                     button: "导入本机登录态".into(), hint: Some("直接读取本机客户端的登录数据并复制一份存进账号（不需要调试端口）；之后查余额、对话都不再依赖客户端，也不会修改或重启它。".into()),

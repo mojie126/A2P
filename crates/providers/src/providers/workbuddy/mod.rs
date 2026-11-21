@@ -759,6 +759,16 @@ impl Provider for WorkBuddyProvider {
         payload: &'a Value,
     ) -> SendFuture<'a, Value> {
         Box::pin(async move {
+            if action == "auth.methods" {
+                return Ok(crate::providers::auth_methods::from_static(
+                    &self.meta(),
+                    &crate::providers::auth_methods::Options {
+                        primary: "token",
+                        embedded_browser: false,
+                        manual_callback: false,
+                    },
+                ));
+            }
             if matches!(action, crate::native_search::CAPABILITIES | crate::native_search::SEARCH) {
                 return search::dispatch(self, ctx, account, action, payload).await;
             }

@@ -458,6 +458,16 @@ impl Provider for ClineProvider {
         _payload: &'a Value,
     ) -> SendFuture<'a, Value> {
         Box::pin(async move {
+            if action == "auth.methods" {
+                return Ok(crate::providers::auth_methods::from_static(
+                    &self.meta(),
+                    &crate::providers::auth_methods::Options {
+                        primary: "token",
+                        embedded_browser: false,
+                        manual_callback: false,
+                    },
+                ));
+            }
             if action != "headers.preview" {
                 return Err(format!("Cline 没有实现管理动作「{action}」"));
             }

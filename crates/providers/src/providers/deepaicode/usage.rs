@@ -85,7 +85,13 @@ pub async fn query(ctx: &PluginCtx, account: &str) -> Result<proto::UsageReport,
             windows.push(window);
         }
     }
-    if let Some(credits) = summary.as_ref().and_then(|value| number(value.get("credits_remaining"))) {
+    // 剩余为 0 的订阅积分整个不输出（与百度搭子同一口径：用完的包不在任何
+    // 地方展示，含额度详情），订阅积分是补充读数，免费账号常有 0 的那种
+    if let Some(credits) = summary
+        .as_ref()
+        .and_then(|value| number(value.get("credits_remaining")))
+        .filter(|credits| *credits > 0.0)
+    {
         windows.push(json!({
             "name": "订阅积分",
             "label": "订阅积分",
@@ -132,4 +138,39 @@ pub async fn query(ctx: &PluginCtx, account: &str) -> Result<proto::UsageReport,
         report["error"] = json!("DeepAI 未为该账号启用每日免费额度");
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{format_number, number};
+
+    /// `credits_remaining` 是数字或 5 位小数字符串；缺失、负数与非数值一律读成 None，
+    /// 不把「读不到」当成 0（那会把订阅积分误判成用完了的包）。
+    #[test]
+    fn credits_remaining_is_parsed_leniently() {
+        assert_eq!(number(Some(&json!(12.5))), Some(12.5));
+        assert_eq!(number(Some(&json!("0.00000"))), Some(0.0));
+        assert_eq!(number(Some(&json!("-1.0"))), None);
+        assert_eq!(number(Some(&json!("abc"))), None);
+        assert_eq!(number(None), None);
+    }
+
+    /// 只有正剩余的订阅积分才进窗口行（与百度搭子 `package_windows` 同一口径）。
+    #[test]
+    fn zero_credits_are_filtered_out() {
+        let zero = number(Some(&json!("0.00000"))).filter(|credits| *credits > 0.0);
+        let positive = number(Some(&json!("25.5"))).filter(|credits| *credits > 0.0);
+        assert_eq!(zero, None);
+        assert_eq!(positive, Some(25.5));
+    }
+
+    /// 整数不带小数尾巴、非整数保留 5 位 —— 窗口读数与改动前逐字一致。
+    #[test]
+    fn format_number_keeps_existing_shape() {
+        assert_eq!(format_number(72.0), "72");
+        assert_eq!(format_number(0.0), "0");
+        assert_eq!(format_number(1.25), "1.25000");
+    }
 }

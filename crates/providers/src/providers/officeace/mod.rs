@@ -401,6 +401,14 @@ impl Provider for OfficeAceProvider {
     ) -> SendFuture<'a, Value> {
         Box::pin(async move {
             match action {
+                "auth.methods" => Ok(crate::providers::auth_methods::from_static(
+                    &self.meta(),
+                    &crate::providers::auth_methods::Options {
+                        primary: "baseUrl",
+                        embedded_browser: false,
+                        manual_callback: false,
+                    },
+                )),
                 "subscription.preview" => activation::preview(ctx, account).await,
                 "subscription.simulate-client" => activation::simulate_client(ctx, account).await,
                 "subscription.ensure" => activation::ensure(

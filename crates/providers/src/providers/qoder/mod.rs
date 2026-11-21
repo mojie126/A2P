@@ -655,6 +655,14 @@ impl Provider for QoderProvider {
     ) -> SendFuture<'a, Value> {
         Box::pin(async move {
             match action {
+                "auth.methods" => Ok(crate::providers::auth_methods::from_static(
+                    &self.meta(),
+                    &crate::providers::auth_methods::Options {
+                        primary: "pat",
+                        embedded_browser: false,
+                        manual_callback: false,
+                    },
+                )),
                 "risk.status" => Ok(risk::status(self.site)),
                 "risk.install" => risk::install_component()
                     .await

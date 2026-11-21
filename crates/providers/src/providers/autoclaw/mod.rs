@@ -137,13 +137,23 @@ fn login_methods(region: Region) -> Vec<proto::LoginMethod> {
         Region::Cn => vec![proto::LoginMethod::Sms {
             hint: Some("用绑定的手机号登录：点「获取验证码」后填入即可".to_string()),
         }],
-        Region::Intl => vec![proto::LoginMethod::Browser {
-            button: "网页登录（Zai / Google）".to_string(),
-            hint: Some(
-                "点按钮后先过一次滑块验证（官方风控），随后打开登录页，登录完成即自动添加账号"
-                    .to_string(),
-            ),
-        }],
+        Region::Intl => vec![
+            proto::LoginMethod::Browser {
+                button: "网页登录（Zai / Google）".to_string(),
+                hint: Some(
+                    "点按钮后先过一次滑块验证（官方风控），随后打开登录页，登录完成即自动添加账号"
+                        .to_string(),
+                ),
+            },
+            proto::LoginMethod::Token {
+                label: "填写凭据".to_string(),
+                placeholder: "粘贴 token（支持 enc: 加密值）".to_string(),
+                extra_fields: vec![
+                    proto::LoginField { key: "refreshToken".into(), label: "refreshToken".into(), placeholder: "没有则无法自动续期".into(), optional: true, multiline: false },
+                    proto::LoginField { key: "deviceId".into(), label: "deviceId".into(), placeholder: "可选，续期时带上".into(), optional: true, multiline: false },
+                ],
+            },
+        ],
     }
 }
 
@@ -555,13 +565,31 @@ impl Provider for AutoClawProvider {
         Box::pin(async move {
             let region = self.region;
             match action {
-                "login.sms-send" => {
+                "auth.methods" => Ok(match region {
+                    Region::Cn => serde_json::json!({ "methods": [
+                        { "methodIndex": 0, "type": "sms", "label": "手机验证码登录", "prompts": [], "browserMode": "none",
+                          "sms": { "phoneLabel": "手机号", "phonePlaceholder": "11 位大陆手机号",
+                            "countryCodes": [{ "value": "86", "label": "+86" }], "phoneMinLength": 11, "phoneMaxLength": 11,
+                            "codeMinLength": 6, "codeMaxLength": 6, "resendAfterSeconds": 60, "expiresAfterSeconds": 300 } },
+                        { "methodIndex": 1, "type": "api", "label": "填写凭据", "prompts": [
+                            { "key": "token", "type": "text", "label": "token", "secret": true },
+                            { "key": "refreshToken", "type": "text", "label": "refreshToken", "secret": true, "optional": true },
+                            { "key": "deviceId", "type": "text", "label": "deviceId", "optional": true },
+                            { "key": "name", "type": "text", "label": "备注名", "optional": true } ] },
+                        { "methodIndex": 2, "type": "desktop", "label": "导入本机登录态", "prompts": [], "localOnly": true,
+                          "browserMode": "none", "manualCallback": false, "callbackInput": "url" }
+                    ] }),
+                    Region::Intl => crate::providers::auth_methods::from_static(&self.meta(), &crate::providers::auth_methods::Options {
+                        primary: "token", embedded_browser: false, manual_callback: false,
+                    }),
+                }),
+                "login.sms.send" | "login.sms-send" => {
                     let phone = payload.get("phone").and_then(Value::as_str).unwrap_or("");
                     login::send_code(region, phone)
                         .await
                         .map_err(GatewayError::into_message)
                 }
-                "login.sms-verify" => {
+                "login.sms.verify" | "login.sms-verify" => {
                     let phone = payload.get("phone").and_then(Value::as_str).unwrap_or("");
                     let code = payload.get("code").and_then(Value::as_str).unwrap_or("");
                     let device_id = payload.get("deviceId").and_then(Value::as_str);

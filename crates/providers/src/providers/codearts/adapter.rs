@@ -750,6 +750,14 @@ impl Provider for CodeArtsProvider {
             let base = super::models::DEFAULT_BASE_URL;
             let now_ms = logging::now_ms();
             match action {
+                "auth.methods" => Ok(crate::providers::auth_methods::from_static(
+                    &self.meta(),
+                    &crate::providers::auth_methods::Options {
+                        primary: "credentialJson",
+                        embedded_browser: false,
+                        manual_callback: true,
+                    },
+                )),
                 "welfare.preview" => super::welfare::preview(ctx, account, base, now_ms)
                     .await
                     .map_err(GatewayError::into_message),

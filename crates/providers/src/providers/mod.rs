@@ -73,6 +73,9 @@ pub mod deepaicode;
 #[cfg(feature = "codar")]
 pub mod codar;
 
+/// 原生插件共用的动态登录方式构造（`auth.methods`）
+pub mod auth_methods;
+
 use agent2api_provider_sdk::BoxProvider;
 
 /// 装出这个包提供的全部 provider。
@@ -221,5 +224,38 @@ mod tests {
             .collect();
         assert!(ids.iter().any(|id| id == "deepaicode"), "缺少 DeepAI Code");
         assert!(ids.iter().any(|id| id == "codar"), "缺少科搭");
+    }
+
+    /// 每个原生家都必须有可用的登录方式：网关不再回退旧版静态入口，
+    /// 没有动态登录方式的家在「添加账号」里会直接报错。
+    ///
+    /// 只用静态声明跑构造器校验形状；各家自行实现的 `auth.methods`（含短信）
+    /// 由各自的单测覆盖。
+    #[test]
+    fn every_provider_declares_login_methods() {
+        use agent2api_provider_protocol as proto;
+
+        for provider in registry() {
+            let meta = provider.meta();
+            assert!(!meta.login_methods.is_empty(), "{} 没有静态登录声明", meta.id);
+            let value = crate::providers::auth_methods::from_static(
+                &meta,
+                &crate::providers::auth_methods::Options::default(),
+            );
+            let methods = value["methods"].as_array().cloned().unwrap_or_default();
+            let sms_only = meta.login_methods.iter().all(|method| matches!(method, proto::LoginMethod::Sms { .. }));
+            // 只有短信的家由自己的 methods 覆盖，这里不要求构造器出结果
+            assert!(!methods.is_empty() || sms_only, "{} 没有可用的动态登录方式", meta.id);
+            let mut indexes = Vec::new();
+            for method in &methods {
+                let kind = method["type"].as_str().unwrap_or("");
+                assert!(matches!(kind, "oauth" | "api" | "desktop"), "{} 登录方式类型无效：{kind}", meta.id);
+                assert!(method["prompts"].is_array(), "{} 登录方式缺少 prompts", meta.id);
+                indexes.push(method["methodIndex"].as_u64().unwrap_or(u64::MAX));
+            }
+            indexes.sort_unstable();
+            indexes.dedup();
+            assert_eq!(indexes.len(), methods.len(), "{} 登录方式索引重复", meta.id);
+        }
     }
 }

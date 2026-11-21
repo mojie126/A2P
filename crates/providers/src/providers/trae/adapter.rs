@@ -47,6 +47,31 @@ use super::PROVIDER_ID;
 pub struct TraeProvider;
 
 impl Provider for TraeProvider {
+
+    fn admin_action<'a>(
+        &'a self,
+        _ctx: &'a agent2api_provider_sdk::PluginCtx,
+        _account: &'a str,
+        action: &'a str,
+        _payload: &'a serde_json::Value,
+    ) -> agent2api_provider_sdk::SendFuture<'a, serde_json::Value> {
+        Box::pin(async move {
+            match action {
+                "auth.methods" => Ok(crate::providers::auth_methods::from_static(
+                    &self.meta(),
+                    &crate::providers::auth_methods::Options {
+                        primary: "accessToken",
+                        embedded_browser: false,
+                        manual_callback: false,
+                    },
+                )),
+                other => Err(agent2api_provider_sdk::unsupported(format!(
+                    "该提供商不支持管理动作「{other}」"
+                ))),
+            }
+        })
+    }
+
     fn meta(&self) -> ProviderMeta {
         ProviderMeta::new(PROVIDER_ID, "Trae")
             .with_capabilities(proto::Capabilities {
@@ -82,7 +107,12 @@ impl Provider for TraeProvider {
                 proto::LoginMethod::Token {
                     label: "登录凭据".to_string(),
                     placeholder: "粘贴 CPA auth 文件内容或 accessToken".to_string(),
-                    extra_fields: Vec::new(),
+                    extra_fields: vec![
+                        proto::LoginField { key: "refreshToken".into(), label: "refreshToken".into(), placeholder: "".into(), optional: true, multiline: false },
+                        proto::LoginField { key: "uid".into(), label: "uid".into(), placeholder: "".into(), optional: true, multiline: false },
+                        proto::LoginField { key: "machineId".into(), label: "machineId".into(), placeholder: "".into(), optional: true, multiline: false },
+                        proto::LoginField { key: "deviceId".into(), label: "deviceId".into(), placeholder: "".into(), optional: true, multiline: false },
+                    ],
                 },
             ])
             .with_models(models::list())
