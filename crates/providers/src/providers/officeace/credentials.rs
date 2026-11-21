@@ -29,9 +29,11 @@
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：本文件零 unwrap/expect/panic。
 
+use agent2api_provider_protocol::WireProxy;
 use serde_json::Value;
 
 use crate::errors::GatewayError;
+use crate::proxy_util::{resolve_account_proxy, ProxyResolution};
 
 use super::signer::Credential as SigningCredential;
 
@@ -65,6 +67,8 @@ pub struct OfficeAceCredential {
     pub project_id: String,
     /// 控制面凭据到期时刻（毫秒；0 = 未知）
     pub expires_at: i64,
+    /// 账号记录里配的代理：所有控制面与网关请求都走它（`None` = 直连）
+    pub proxy: Option<WireProxy>,
 }
 
 impl OfficeAceCredential {
@@ -116,6 +120,13 @@ pub fn from_record(record: Option<&Value>) -> Result<OfficeAceCredential, Gatewa
             "没有可用的 OfficeAce 账号：请在账号页添加账号",
         ));
     };
+    let proxy = match resolve_account_proxy(record.get("proxy")) {
+        None => None,
+        Some(ProxyResolution::Resolved(proxy)) => Some(proxy),
+        Some(ProxyResolution::Failed(reason)) => {
+            return Err(GatewayError::with_status(400, reason))
+        }
+    };
     let credential = OfficeAceCredential {
         id: pick(record, &["id", "accountId"]),
         base_url: pick(record, &["baseUrl", "base_url", "api_base", "apiBase"]),
@@ -126,6 +137,7 @@ pub fn from_record(record: Option<&Value>) -> Result<OfficeAceCredential, Gatewa
         security_token: pick(record, &["securityToken", "security_token"]),
         project_id: pick(record, &["projectId", "project_id"]),
         expires_at: record.get("expiresAt").and_then(Value::as_i64).unwrap_or(0),
+        proxy,
     };
     if !credential.can_forward() {
         return Err(GatewayError::with_status(

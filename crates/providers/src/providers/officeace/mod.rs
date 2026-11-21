@@ -455,13 +455,15 @@ impl Provider for OfficeAceProvider {
         &'a self,
         _ctx: &'a PluginCtx,
         method: &'a str,
-        _payload: &'a Value,
+        payload: &'a Value,
     ) -> SendFuture<'a, proto::LoginStart> {
         Box::pin(async move {
             if method != "browser" && !method.is_empty() {
                 return Err(format!("OfficeAce 不支持这种登录方式：{method}"));
             }
-            let (flow, url, interval) = oauth::start().await?;
+            // 登录弹窗里选的代理：取 state、轮询授权码与开通检查全程走它
+            let proxy = crate::proxy_util::resolve_login_proxy(payload.get("proxy"))?;
+            let (flow, url, interval) = oauth::start(proxy).await?;
             Ok(proto::LoginStart {
                 flow,
                 url,

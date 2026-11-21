@@ -40,6 +40,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+use agent2api_provider_protocol::WireProxy;
 use serde_json::{json, Value};
 
 use crate::dpop::DpopKey;
@@ -76,6 +77,8 @@ const REQUEST_TIMEOUT_MS: u64 = 30_000;
 struct Pending {
     code_verifier: String,
     dpop_key_pair: Value,
+    /// 登录弹窗里选的代理：取码、换证与开通检查全程走它
+    proxy: Option<WireProxy>,
     /// 上一次轮询取码失败的原因（`404` 这类作废情形要立刻报出来，不能拖到超时）
     failure: Option<String>,
 }
@@ -124,9 +127,9 @@ fn random_bytes(count: usize) -> Vec<u8> {
 }
 
 /// 第一步：向云端要一个 state（**无鉴权**）。
-async fn fetch_state() -> Result<String, String> {
+async fn fetch_state(proxy: Option<&WireProxy>) -> Result<String, String> {
     let url = format!("{CLOUD_BASE}/v1/claw/auth/state");
-    let response = crate::http::control_client(None, "direct")
+    let response = crate::http::control_client(proxy, "direct")
         .post(&url)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
@@ -161,8 +164,8 @@ fn build_authorize_url(state: &str, challenge: &str) -> String {
 }
 
 /// 发起一轮登录（①②③），返回 `(flow, auth_url, poll_interval_ms)`。
-pub async fn start() -> Result<(String, String, u64), String> {
-    let state = fetch_state().await?;
+pub async fn start(proxy: Option<WireProxy>) -> Result<(String, String, u64), String> {
+    let state = fetch_state(proxy.as_ref()).await?;
     // PKCE：verifier 是 43–128 位随机串；challenge = base64url(sha256(verifier))
     let code_verifier = base64url(&random_bytes(32));
     let challenge = {
@@ -177,6 +180,7 @@ pub async fn start() -> Result<(String, String, u64), String> {
             Pending {
                 code_verifier,
                 dpop_key_pair,
+                proxy,
                 failure: None,
             },
         );
@@ -192,9 +196,9 @@ pub fn cancel(flow: &str) {
 }
 
 /// 单次取码。`Ok(None)` = 还没登完（202）；`Err` = 作废（404）或其它失败。
-async fn poll_code(state: &str) -> Result<Option<String>, String> {
+async fn poll_code(state: &str, proxy: Option<&WireProxy>) -> Result<Option<String>, String> {
     let url = format!("{CLOUD_BASE}/v1/claw/auth/code?state={}", url_escape(state));
-    let response = crate::http::control_client(None, "direct")
+    let response = crate::http::control_client(proxy, "direct")
         .get(&url)
         .header("Accept", "application/json")
         .timeout(Duration::from_millis(REQUEST_TIMEOUT_MS))
@@ -237,11 +241,12 @@ async fn poll_code(state: &str) -> Result<Option<String>, String> {
 
 /// 轮询一次：`Ok(None)` = 还没好；`Ok(Some(secret))` = 完成（返回落库形态的 secret）。
 pub async fn poll(flow: &str) -> Result<Option<Value>, GatewayError> {
-    let (code_verifier, dpop_key_pair, failure) = match with_flows(|table| {
+    let (code_verifier, dpop_key_pair, proxy, failure) = match with_flows(|table| {
         table.get(flow).map(|pending| {
             (
                 pending.code_verifier.clone(),
                 pending.dpop_key_pair.clone(),
+                pending.proxy.clone(),
                 pending.failure.clone(),
             )
         })
@@ -260,7 +265,7 @@ pub async fn poll(flow: &str) -> Result<Option<Value>, GatewayError> {
         });
         return Err(GatewayError::with_status(400, failure));
     }
-    let code = match poll_code(flow).await {
+    let code = match poll_code(flow, proxy.as_ref()).await {
         Ok(Some(code)) => code,
         Ok(None) => return Ok(None),
         Err(error) => {
@@ -270,7 +275,7 @@ pub async fn poll(flow: &str) -> Result<Option<Value>, GatewayError> {
             return Err(GatewayError::with_status(400, error));
         }
     };
-    let credential = finish(&code, &code_verifier, &dpop_key_pair).await;
+    let credential = finish(&code, &code_verifier, &dpop_key_pair, proxy.as_ref()).await;
     with_flows(|table| {
         table.remove(flow);
     });
@@ -335,17 +340,18 @@ async fn finish(
     code: &str,
     code_verifier: &str,
     dpop_key_pair: &Value,
+    proxy: Option<&WireProxy>,
 ) -> Result<GatewayCredential, String> {
     let (mut temporary, expires_at, identity, refresh_token) =
-        exchange_code(code, code_verifier, dpop_key_pair).await?;
+        exchange_code(code, code_verifier, dpop_key_pair, proxy).await?;
     // ① project_id 补查
     if temporary.project_id.is_empty() {
-        if let Some(project_id) = resolve_project_id(&temporary, REGION).await {
+        if let Some(project_id) = resolve_project_id(&temporary, REGION, proxy).await {
             temporary.project_id = project_id;
         }
     }
     // ② 权限校验：identity +（可能为空的）model_info
-    let (account_id, permission_principal, model_info) = fetch_permission(&temporary).await?;
+    let (account_id, permission_principal, model_info) = fetch_permission(&temporary, proxy).await?;
     // ③ 没开通就开通一次 —— 官方对「model_info 为空」的处置就是这条路
     let model_info = if model_info.is_object() {
         model_info
@@ -354,7 +360,7 @@ async fn finish(
             "[OfficeAce]",
             "账号尚未开通，尝试自动开通（client-subscription）",
         );
-        subscribe_model_info(CLOUD_BASE, &temporary, None).await?
+        subscribe_model_info(CLOUD_BASE, &temporary, None, proxy).await?
     };
     let (base_url, model_app_key, model_app_secret) = gateway_of(&model_info)?;
     let principal_id = if identity.principal_id.is_empty() {
@@ -389,6 +395,7 @@ async fn finish(
 pub async fn refresh(
     dpop_key_pair: &Value,
     refresh_token: &str,
+    proxy: Option<&WireProxy>,
 ) -> Result<(SigningCredential, i64, String, String), String> {
     if refresh_token.trim().is_empty() {
         return Err("OfficeAce 账号没有 refresh token，只能重新登录授权".to_string());
@@ -407,7 +414,7 @@ pub async fn refresh(
     .map(|(name, value)| format!("{}={}", url_escape(name), url_escape(value)))
     .collect::<Vec<_>>()
     .join("&");
-    let response = crate::http::control_client(None, "direct")
+    let response = crate::http::control_client(proxy, "direct")
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
@@ -469,6 +476,7 @@ async fn exchange_code(
     code: &str,
     code_verifier: &str,
     dpop_key_pair: &Value,
+    proxy: Option<&WireProxy>,
 ) -> Result<(SigningCredential, i64, TokenIdentity, String), String> {
     let key = DpopKey::from_json(dpop_key_pair)
         .map_err(|error| format!("DPoP 私钥不可用：{error}"))?;
@@ -486,7 +494,7 @@ async fn exchange_code(
     .map(|(name, value)| format!("{}={}", url_escape(name), url_escape(value)))
     .collect::<Vec<_>>()
     .join("&");
-    let response = crate::http::control_client(None, "direct")
+    let response = crate::http::control_client(proxy, "direct")
         .post(TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
@@ -540,6 +548,7 @@ async fn exchange_code(
 /// `model_info` **可能为空对象**——那是「账号尚未开通」的正常形态。
 pub(super) async fn fetch_permission(
     temporary: &SigningCredential,
+    proxy: Option<&WireProxy>,
 ) -> Result<(String, String, Value), String> {
     let url = format!("{CLOUD_BASE}/v1/claw/client-permission-validate");
     // 头对齐官方 `checkPermission`：订阅类型头 +（signer 自动补的）
@@ -557,7 +566,7 @@ pub(super) async fn fetch_permission(
         region: REGION,
         date_override: None,
     })?;
-    let mut request = crate::http::control_client(None, "direct")
+    let mut request = crate::http::control_client(proxy, "direct")
         .get(&url)
         .timeout(Duration::from_millis(REQUEST_TIMEOUT_MS));
     for (name, value) in &headers {
@@ -596,7 +605,11 @@ pub(super) async fn fetch_permission(
 ///
 /// 返回 `None` = 没查到 —— 调用方如实把空串留给下游，并且**不**把它当登录失败
 /// （validate 那一发不缺它也过）。
-async fn resolve_project_id(credential: &SigningCredential, region: &str) -> Option<String> {
+async fn resolve_project_id(
+    credential: &SigningCredential,
+    region: &str,
+    proxy: Option<&WireProxy>,
+) -> Option<String> {
     let url = format!("{IAM_KEYSTONE_BASE}/v3/projects");
     let headers = signer::sign(&signer::SignRequest {
         algorithm: Algorithm::Sdk,
@@ -609,7 +622,7 @@ async fn resolve_project_id(credential: &SigningCredential, region: &str) -> Opt
         date_override: None,
     })
     .ok()?;
-    let mut request = crate::http::control_client(None, "direct")
+    let mut request = crate::http::control_client(proxy, "direct")
         .get(&url)
         .timeout(Duration::from_millis(REQUEST_TIMEOUT_MS));
     for (name, value) in &headers {
@@ -640,8 +653,9 @@ pub(super) async fn subscribe_model_info(
     cloud_base: &str,
     credential: &SigningCredential,
     promotion_code: Option<&str>,
+    proxy: Option<&WireProxy>,
 ) -> Result<Value, String> {
-    subscribe(cloud_base, credential, promotion_code).await.map_err(GatewayError::into_message)
+    subscribe(cloud_base, credential, promotion_code, proxy).await.map_err(GatewayError::into_message)
 }
 
 pub(super) const SUBSCRIPTION_UNCERTAIN: &str = "officeace_subscription_uncertain";
@@ -650,6 +664,7 @@ pub(super) async fn subscribe(
     cloud_base: &str,
     credential: &SigningCredential,
     promotion_code: Option<&str>,
+    proxy: Option<&WireProxy>,
 ) -> Result<Value, GatewayError> {
     let url = format!("{cloud_base}/v1/claw/client-subscription");
     let body = match promotion_code.map(str::trim).filter(|code| !code.is_empty()) {
@@ -675,7 +690,7 @@ pub(super) async fn subscribe(
         region: REGION,
         date_override: None,
     })?;
-    let mut request = crate::http::control_client(None, "direct")
+    let mut request = crate::http::control_client(proxy, "direct")
         .post(&url)
         .timeout(Duration::from_millis(REQUEST_TIMEOUT_MS))
         .body(body);

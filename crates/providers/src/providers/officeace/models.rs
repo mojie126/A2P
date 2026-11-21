@@ -390,7 +390,7 @@ pub async fn refresh(ctx: &PluginCtx, credential: &OfficeAceCredential, force: b
         &url,
         None,
         &headers,
-        None,
+        credential.proxy.as_ref(),
         Some(20_000),
     )
     .await

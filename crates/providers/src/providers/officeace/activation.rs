@@ -328,7 +328,7 @@ async fn ensure_inner(
 
 async fn verify_identity(credential: &OfficeAceCredential, record: &Value) -> Result<(), GatewayError> {
     let signing = credential.signing().map_err(GatewayError::from)?;
-    let (account, principal, model_info) = oauth::fetch_permission(&signing).await
+    let (account, principal, model_info) = oauth::fetch_permission(&signing, credential.proxy.as_ref()).await
         .map_err(|message| GatewayError::with_status(502, message))?;
     for (key, actual) in [("accountId", account.as_str()), ("principalId", principal.as_str())] {
         let expected = crate::store::pick(record, &[key]);

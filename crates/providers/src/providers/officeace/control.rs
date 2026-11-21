@@ -99,7 +99,7 @@ pub async fn refresh(
             400,
             "OfficeAce 账号缺少 DPoP 私钥上下文，无法续期：请重新登录一次",
         ))?;
-    let (renewed, expires_at, _user_name, next_refresh) = oauth::refresh(dpop, &refresh_token)
+    let (renewed, expires_at, _user_name, next_refresh) = oauth::refresh(dpop, &refresh_token, current.proxy.as_ref())
         .await
         .map_err(|reason| {
             let hint = if reason.contains("refresh token has been used") {

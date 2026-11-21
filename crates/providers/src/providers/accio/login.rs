@@ -82,7 +82,7 @@ fn with_flows<T>(action: impl FnOnce(&mut std::collections::HashMap<String, Entr
 pub(super) async fn login_start(
     region: Region,
     method: &str,
-    _payload: &Value,
+    payload: &Value,
 ) -> Result<proto::LoginStart, String> {
     if method != "browser" {
         return Err(format!(
@@ -90,6 +90,9 @@ pub(super) async fn login_start(
             region.label()
         ));
     }
+    // 登录弹窗里选的代理：换码与资料读取全程走它（网关把解析后的 WireProxy
+    // 放在 payload.proxy；没选时为缺省或 null）
+    let proxy = crate::proxy_util::resolve_login_proxy(payload.get("proxy"))?;
     // 上一轮没收摊的先关掉：端口不释放的话，这一轮的回调可能落到上一轮的
     // 监听器上（授权码一次性，两轮并存等于让其中一轮必输）。
     close_all();
@@ -110,7 +113,7 @@ pub(super) async fn login_start(
             },
         );
     });
-    spawn_completion(flow_id.clone(), Arc::clone(&listener), region);
+    spawn_completion(flow_id.clone(), Arc::clone(&listener), region, proxy);
     logging::log(
         "[Login]",
         &format!("发起 Accio {}网页登录（等待浏览器回调…）", region.label()),
@@ -133,7 +136,12 @@ pub(super) async fn login_start(
 }
 
 /// 后台那半个登录：等回调 → 换码 → 落状态。
-fn spawn_completion(flow_id: String, listener: Arc<CallbackListener>, region: Region) {
+fn spawn_completion(
+    flow_id: String,
+    listener: Arc<CallbackListener>,
+    region: Region,
+    proxy: Option<agent2api_provider_protocol::WireProxy>,
+) {
     tokio::spawn(async move {
         let Some(query) = listener.next_callback().await else {
             return;
@@ -154,7 +162,7 @@ fn spawn_completion(flow_id: String, listener: Arc<CallbackListener>, region: Re
                 entry.state = FlowState::Working;
             }
         });
-        let outcome = finish(&flow_id, region, &query).await;
+        let outcome = finish(&flow_id, region, &query, proxy.as_ref()).await;
         with_flows(|table| {
             if let Some(entry) = table.get_mut(&flow_id) {
                 entry.state = match outcome {
@@ -173,6 +181,7 @@ async fn finish(
     flow_id: &str,
     region: Region,
     query: &str,
+    proxy: Option<&agent2api_provider_protocol::WireProxy>,
 ) -> Result<super::credentials::Credentials, String> {
     // flow id 是 `accio-web-<state>`，state 就是后面那段
     let state = flow_id
@@ -199,7 +208,7 @@ async fn finish(
     } = pending;
     // 用 pending 里的地区（它才是发起时的那一站；回调地址可能被改过）
     let _ = region;
-    oauth::exchange_code(pending_region, &code, &verifier, &redirect_uri, None)
+    oauth::exchange_code(pending_region, &code, &verifier, &redirect_uri, proxy)
         .await
         .map_err(|error| error.message)
 }

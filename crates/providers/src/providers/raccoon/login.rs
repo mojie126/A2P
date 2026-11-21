@@ -3,7 +3,7 @@
 //! 网关已不再回退旧版静态入口，原生插件必须自己回答 `auth.methods`，否则
 //! 添加账号会报「该提供商未声明动态登录方式」。这里声明四种方式：
 //!   · 网页登录：应用内窗口完成登录，壳侧捕获 `office-raccoon://` 回调后换码
-//!   · 填写令牌：accessToken / refreshToken / officeIdentity
+//!   · 填写令牌：accessToken / officeIdentity
 //!   · 导入登录态 JSON：整份 auth.json 粘进来
 //!   · 读取本机客户端登录态：只读网关所在电脑上的 auth.json，不写回
 //!
@@ -58,10 +58,9 @@ pub fn methods() -> Value {
                 "methodIndex": 1,
                 "type": "api",
                 "label": "填写令牌",
-                "instructions": "粘贴小浣熊的访问令牌；填写刷新令牌后到期可自动续期",
+                "instructions": "粘贴小浣熊的访问令牌",
                 "prompts": [
                     { "key": "accessToken", "type": "text", "label": "Access Token", "secret": true, "optional": false },
-                    { "key": "refreshToken", "type": "text", "label": "Refresh Token", "secret": true, "optional": true },
                     { "key": "officeIdentity", "type": "text", "label": "Office Identity", "optional": true }
                 ]
             },

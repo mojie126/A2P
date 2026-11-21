@@ -33,7 +33,7 @@ pub async fn call(
         algorithm, method, url, headers: &headers, body: payload.as_bytes(),
         credential: &signing, region: signer::DEFAULT_REGION, date_override: None,
     }).map_err(GatewayError::from)?;
-    let client = crate::http::control_client(None, "direct");
+    let client = crate::http::control_client(credential.proxy.as_ref(), "direct");
     let mut request = match method {
         "POST" => client.post(url).body(payload),
         _ => client.get(url),

@@ -128,6 +128,34 @@ pub fn resolve_account_proxy(config: Option<&Value>) -> Option<ProxyResolution> 
     )))
 }
 
+/// 解析 `login.start` 里的登录代理（`payload.proxy`）。
+///
+/// 缺省 / `null` / `source: "direct"` → `None`：没选代理，跟随系统代理；
+/// 可解析的代理 → `Some(WireProxy)`：登录链路全程走它；
+/// 给了但解析不了 → 明确报错，**不静默回落直连**：无头服务器上「连不上上游」
+/// 与「选了代理但代理坏了」是两件事，后者用户能自己修。
+pub fn resolve_login_proxy(raw: Option<&Value>) -> Result<Option<WireProxy>, String> {
+    let Some(raw) = raw else { return Ok(None) };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    // 网关的 `checked_login_proxy` 既可能给解析后的 `WireProxy`，也可能给
+    // 原始配置（`source` / `proxyId` 形态）。先按 WireProxy 认，认不出再走
+    // 账号级代理的解析器（它对 `direct` / `rotate` / 池引用都有明确结论）。
+    if let Ok(proxy) = serde_json::from_value::<WireProxy>(raw.clone()) {
+        if !proxy.host.trim().is_empty() {
+            return Ok(Some(proxy));
+        }
+    }
+    match resolve_account_proxy(Some(raw)) {
+        None => Ok(None),
+        Some(ProxyResolution::Resolved(proxy)) => Ok(Some(proxy)),
+        Some(ProxyResolution::Failed(reason)) => Err(format!(
+            "这一轮登录的代理不可用（{reason}）：请在登录弹窗里换一条代理，或先修好它再重试"
+        )),
+    }
+}
+
 /// 把代理 URL 拆成 `WireProxy`。
 ///
 /// 手写解析而不是引 `url` crate：只需要 `scheme://[user:pass@]host:port` 这一种

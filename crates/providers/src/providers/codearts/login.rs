@@ -82,7 +82,7 @@ fn with_flows<T>(action: impl FnOnce(&mut HashMap<String, Entry>) -> T) -> T {
 /// 发起一次 CodeArts 网页登录。
 pub(super) async fn login_start(
     method: &str,
-    _payload: &serde_json::Value,
+    payload: &serde_json::Value,
 ) -> Result<proto::LoginStart, String> {
     if method != "browser" {
         return Err(
@@ -90,6 +90,8 @@ pub(super) async fn login_start(
                 .to_string(),
         );
     }
+    // 登录弹窗里选的代理：换码与 ticket 轮询全程走它
+    let proxy = crate::proxy_util::resolve_login_proxy(payload.get("proxy"))?;
     // 上一轮没收摊的先关掉：端口不释放的话，这一轮的回调可能落到上一轮的
     // 监听器上（授权码一次性，两轮并存等于让其中一轮必输）。
     close_all();
@@ -116,7 +118,7 @@ pub(super) async fn login_start(
             },
         );
     });
-    spawn_completion(flow_id.clone(), Arc::clone(&listener), pending);
+    spawn_completion(flow_id.clone(), Arc::clone(&listener), pending, proxy);
     logging::log(
         "[Login]",
         &format!(
@@ -144,7 +146,12 @@ pub(super) async fn login_start(
 /// 回调里带 `code` → 直接换码（正常路径，拿得到 refresh token）；
 /// 只带 `secret` → 转 ticket 轮询（拿不到 refresh token，但至少能把账号建起来）。
 /// 两条通道**共用**同一个监听器与同一个待办表，不复制第二套换证逻辑。
-fn spawn_completion(flow_id: String, listener: Arc<CallbackListener>, pending: PendingLogin) {
+fn spawn_completion(
+    flow_id: String,
+    listener: Arc<CallbackListener>,
+    pending: PendingLogin,
+    proxy: Option<agent2api_provider_protocol::WireProxy>,
+) {
     tokio::spawn(async move {
         let query = listener.next_callback().await;
         let Some(query) = query else {
@@ -160,7 +167,7 @@ fn spawn_completion(flow_id: String, listener: Arc<CallbackListener>, pending: P
         };
         set_state(&flow_id, FlowState::Working);
         let params = parse_query(&query);
-        let outcome = finish(&params, &pending).await;
+        let outcome = finish(&params, &pending, proxy.as_ref()).await;
         with_flows(|table| {
             if let Some(entry) = table.get_mut(&flow_id) {
                 entry.state = match outcome {
@@ -186,6 +193,7 @@ fn set_state(flow_id: &str, next: FlowState) {
 async fn finish(
     params: &HashMap<String, String>,
     pending: &PendingLogin,
+    proxy: Option<&agent2api_provider_protocol::WireProxy>,
 ) -> Result<Credential, String> {
     let get = |key: &str| {
         params
@@ -196,13 +204,13 @@ async fn finish(
     let code = get("code");
     let secret = get("secret");
     if !code.is_empty() {
-        return exchange_by_code(&code, pending).await;
+        return exchange_by_code(&code, pending, proxy).await;
     }
     if !secret.is_empty() {
         // portal 下发的 secret 记进**这一轮**（ticket 通道用的就是它）。
         // 监听器那边已经投递过一次 query，这里再记一次是幂等的。
         oauth::attach_ticket_secret(&pending.ticket_id, &secret);
-        return exchange_by_ticket(pending).await;
+        return exchange_by_ticket(pending, proxy).await;
     }
     Err("回调里没有授权码也没有 secret：请把浏览器地址栏里那条回调地址完整粘贴过来".to_string())
 }
@@ -217,7 +225,11 @@ async fn finish(
 /// 换码失败时这一轮必须留在表里。免鉴权端口上任何人打一次「随便编个 code」
 /// 就能把用户正在进行的登录全部作废 —— 取走式写法等于把「取消别人的登录」
 /// 做成免费服务。**只有成功才取走**。
-async fn exchange_by_code(code: &str, pending: &PendingLogin) -> Result<Credential, String> {
+async fn exchange_by_code(
+    code: &str,
+    pending: &PendingLogin,
+    proxy: Option<&agent2api_provider_protocol::WireProxy>,
+) -> Result<Credential, String> {
     let mut ordered: Vec<PendingLogin> = Vec::new();
     let candidates = oauth::candidates();
     // 本轮排第一（端口归属已经确定了这一轮，它最可能是对的）
@@ -244,7 +256,7 @@ async fn exchange_by_code(code: &str, pending: &PendingLogin) -> Result<Credenti
         let Some(peeked) = oauth::peek_pending(&candidate.ticket_id) else {
             continue;
         };
-        match oauth::exchange_for(&peeked, code, None).await {
+        match oauth::exchange_for(&peeked, code, proxy).await {
             Ok(credential) => {
                 // 成功才取走：授权码与 verifier 都是一次性的
                 oauth::take_pending(&candidate.ticket_id);
@@ -272,7 +284,10 @@ async fn exchange_by_code(code: &str, pending: &PendingLogin) -> Result<Credenti
 /// 插件这一侧本来就在一个后台任务里（`spawn_completion`），再套一层任务只是
 /// 多一个句柄要管；就地循环的退出条件与那个任务完全一致（超时 / 成功 / 取消
 /// 由 `close` 触发的 channel 关闭表达）。
-async fn exchange_by_ticket(pending: &PendingLogin) -> Result<Credential, String> {
+async fn exchange_by_ticket(
+    pending: &PendingLogin,
+    proxy: Option<&agent2api_provider_protocol::WireProxy>,
+) -> Result<Credential, String> {
     let deadline = logging::now_ms() + oauth::LOGIN_TIMEOUT_MS as i64;
     loop {
         // 只读一份来轮：换成功才从表里取走
@@ -282,7 +297,7 @@ async fn exchange_by_ticket(pending: &PendingLogin) -> Result<Credential, String
         if logging::now_ms() >= deadline {
             return Err("登录超时：ticket 通道没能换取到凭证，请重新发起".to_string());
         }
-        match oauth::poll_ticket(models::DEFAULT_BASE_URL, &current, None).await {
+        match oauth::poll_ticket(models::DEFAULT_BASE_URL, &current, proxy).await {
             Ok(mut credential) => {
                 let Some(_claimed) = oauth::take_pending(&pending.ticket_id) else {
                     return Err("这一轮登录已取消，请重新发起".to_string());
