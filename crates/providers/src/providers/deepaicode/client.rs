@@ -53,6 +53,20 @@ pub fn lane_version() -> String {
         .unwrap_or_else(|| endpoints::DEFAULT_LANE.to_string())
 }
 
+/// 对话链路 User-Agent（`DEEPAI_USER_AGENT` 可覆盖）。
+///
+/// 上游 2026-11-07 起 WAF 拦 `user-agent: node`；2026-11-22 实测在显式插件
+/// UA 下 `image_url` 仍被上游按后端差异静默丢弃（`image_tokens` 恒 0、模型
+/// 自述未收到图），UA 与识图行为无关。上游再调整客户端门禁时用本变量切换
+/// UA 验证，不必重编插件。
+pub fn chat_user_agent() -> String {
+    std::env::var("DEEPAI_USER_AGENT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| endpoints::USER_AGENT.to_string())
+}
+
 /// 进程启动时刻（心跳 `up=` 使用）。
 fn started_at() -> &'static Instant {
     static STARTED: OnceLock<Instant> = OnceLock::new();
@@ -82,6 +96,12 @@ pub fn base_headers(credentials: &Credentials) -> Vec<(String, String)> {
 /// 对话请求头：在上面基础上补内容类型与接受类型。
 pub fn chat_headers(credentials: &Credentials, stream: bool) -> Vec<(String, String)> {
     let mut headers = base_headers(credentials);
+    // UA 单独覆盖：base_headers 的 UA 服务 JSON 管理接口，对话链路可独立指定
+    for (name, value) in headers.iter_mut() {
+        if name.eq_ignore_ascii_case("User-Agent") {
+            *value = chat_user_agent();
+        }
+    }
     headers.push(("Content-Type".to_string(), "application/json".to_string()));
     headers.push((
         "Accept".to_string(),
