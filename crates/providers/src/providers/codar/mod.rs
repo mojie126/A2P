@@ -62,8 +62,8 @@ impl Provider for CodarProvider {
             })
             .with_login(vec![
                 proto::LoginMethod::Token {
-                    label: "粘贴科搭访问令牌（JWT，或包含 accessToken 的凭据 JSON）".into(),
-                    placeholder: "eyJ… 或 {\"accessToken\":\"…\"}".into(),
+                    label: "粘贴科搭凭据：登录令牌 JWT，或包含 accessToken 与 apiKey 的凭据 JSON（上游要求第三方客户端用 API Key 对话）".into(),
+                    placeholder: "eyJ… 或 {\"accessToken\":\"…\",\"apiKey\":\"…\"}".into(),
                     extra_fields: Vec::new(),
                 },
                 proto::LoginMethod::Desktop {
@@ -296,10 +296,10 @@ impl Provider for CodarProvider {
 
     /// 上游失败分类：凭证失效、点数/并发限额、内容审核与其它。
     fn classify(&self, status: u16, body: &Value) -> proto::ErrorClass {
-        let message = format!(
+        let message = client::with_credential_hint(format!(
             "科搭上游返回 {status}：{}",
             client::message(body)
-        );
+        ));
         match client::kind(status, body) {
             "token_expired" => proto::ErrorClass::TokenExpired { message },
             "quota_limited" => proto::ErrorClass::QuotaLimited {
@@ -322,13 +322,14 @@ impl Provider for CodarProvider {
     }
 }
 
-/// 取账号记录的访问令牌（不触发续期，用于目录查询）。
+/// 取账号记录的业务凭据（不触发续期，用于目录查询；优先 API Key）。
 async fn stored_token(ctx: &PluginCtx, account: &str) -> Option<String> {
     if account.trim().is_empty() {
         return None;
     }
     let stored = ctx.store_get(PROVIDER_ID, account).await.ok()?;
-    let token = accounts::Credentials::from_secret(&stored.secret).access_token;
+    let credentials = accounts::Credentials::from_secret(&stored.secret);
+    let token = credentials.business_token().to_string();
     (!token.is_empty()).then_some(token)
 }
 

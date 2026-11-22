@@ -413,6 +413,7 @@ async fn finish_with_token_source(
         },
         expires_at: super::credentials::expires(&token),
         access_token: token,
+        api_key: String::new(),
         username,
         uid: data.get("uid").and_then(Value::as_str).unwrap_or("").trim().to_string(),
         nickname,

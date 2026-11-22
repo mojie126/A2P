@@ -88,9 +88,16 @@ pub(super) async fn login_start(
         url: auth_url,
         instructions: "在打开的页面里完成授权，完成后本页会自动继续".to_string(),
         poll_interval_ms,
-        // 授权页在**上游域名**终结、回调永远不回到本机 —— 由网关轮询收尾
+        // 授权页在**上游域名**终结、回调永远不回到本机 —— 由网关轮询收尾。
+        // 白名单须覆盖三处：中转页在 zcode.z.ai，授权页按地区在
+        // bigmodel.cn（国内版，实测 authorize_url 即此域）与 chat.z.ai（国际版）；
+        // 缺了授权域会被桌面端的「登录链接不是允许的 HTTPS 站点」拦下
         external_browser: true,
-        allowed_hosts: vec!["zcode.z.ai".to_string()],
+        allowed_hosts: vec![
+            "zcode.z.ai".to_string(),
+            "bigmodel.cn".to_string(),
+            "chat.z.ai".to_string(),
+        ],
     })
 }
 

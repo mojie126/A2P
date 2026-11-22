@@ -156,7 +156,8 @@ async fn forward(
     };
     let protocol = models::protocol_of_model(&model);
     let authentication = models::authentication_of_model(&model);
-    let token = credentials.access_token;
+    // 业务接口优先使用 API Key：登录凭据被上游限制为科搭官方客户端
+    let token = credentials.business_token().to_string();
     let (url, body, headers) = match protocol.as_str() {
         "anthropic" => {
             let mut body = crate::anthropic::anthropic_outbound::anthropic_request_from_chat(&request.body, &model)
@@ -236,7 +237,7 @@ async fn forward(
     if !(200..300).contains(&status) {
         let text = response.text().await.unwrap_or_default();
         let payload: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-        return Err((status, client::message(&payload)));
+        return Err((status, client::with_credential_hint(client::message(&payload))));
     }
     let id = format!("chatcmpl-{}", ids::new_message_id());
     match protocol.as_str() {

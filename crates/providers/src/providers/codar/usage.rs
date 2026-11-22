@@ -129,12 +129,16 @@ fn point_windows(points: &Points) -> Vec<Value> {
     windows
 }
 
-/// 顶层余额只取通用点数的正剩余。
+/// 顶层「可用合计」取非附加项（通用与 Agent）的正剩余之和。
 ///
-/// 写 0 会让组头「可用合计」与账号行余额列把这家读成「余额为零」，
-/// 而实际含义只是「通用点数这一项用完了」。
+/// 改写点数是附加项（`aside`），不参与合计；写 0 会让组头「可用合计」
+/// 与账号行余额列把这家读成「余额为零」，而实际含义只是「这一项用完了」。
 fn top_balance(points: &Points) -> Option<f64> {
-    points.general.filter(|value| *value > 0.0)
+    let total: f64 = [points.general, points.agent]
+        .into_iter()
+        .flatten()
+        .sum();
+    (total > 0.0).then_some(total)
 }
 
 pub async fn query(ctx: &PluginCtx, account: &str) -> Result<proto::UsageReport, String> {
@@ -165,27 +169,27 @@ mod tests {
 
     use super::{point_windows, top_balance, Points};
 
-    /// 剩余为 0 的点数包既不进窗口行，也不写进顶层余额。
+    /// 剩余为 0 的点数包既不进窗口行，也不参与顶层合计。
     ///
     /// 实测形态（截图）：通用 500、Agent 2000、改写 0 —— 改写那一行必须在
-    /// 额度详情里整个消失，而顶层「可用合计」取通用点数的 500。
+    /// 额度详情里整个消失，而顶层「可用合计」取通用与 Agent 之和的 2500。
     #[test]
     fn zero_packs_are_omitted() {
         let points = Points { general: Some(500.0), agent: Some(2000.0), rewrite: Some(0.0) };
         let windows = point_windows(&points);
         let ids: Vec<&str> = windows.iter().filter_map(|row| row["id"].as_str()).collect();
         assert_eq!(ids, vec!["general", "agent"]);
-        assert_eq!(top_balance(&points), Some(500.0));
+        assert_eq!(top_balance(&points), Some(2500.0));
     }
 
-    /// 通用点数用尽时不给顶层余额，避免组头读成「余额为零」。
+    /// 通用点数用尽时顶层合计只剩 Agent 点数，不读成「余额为零」。
     #[test]
     fn drained_general_leaves_no_top_balance() {
         let points = Points { general: Some(0.0), agent: Some(2000.0), rewrite: None };
         let windows = point_windows(&points);
         let ids: Vec<&str> = windows.iter().filter_map(|row| row["id"].as_str()).collect();
         assert_eq!(ids, vec!["agent"]);
-        assert_eq!(top_balance(&points), None);
+        assert_eq!(top_balance(&points), Some(2000.0));
     }
 
     /// 三条都读不到时窗口为空，顶层余额也不凭空补 0。

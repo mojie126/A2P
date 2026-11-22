@@ -72,6 +72,21 @@ pub fn message(value: &Value) -> String {
     "上游请求失败".to_string()
 }
 
+/// 给「登录凭据仅限科搭客户端」的上游拒绝补上可执行的指引。
+///
+/// 上游原文是 `This login credential is restricted to Codar. Use an API key
+/// for other clients.`（HTTP 403）：登录令牌只能用于科搭官方客户端，
+/// 第三方客户端的对话请求要在账号凭据 JSON 里补充 `apiKey`。
+pub fn with_credential_hint(message: String) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("use an api key") || lower.contains("restricted to") {
+        return format!(
+            "{message}（登录凭据仅限科搭官方客户端使用，请在账号凭据中补充 API Key 后重新导入）"
+        );
+    }
+    message
+}
+
 /// 业务失败判定。
 pub fn failed(value: &Value) -> bool {
     value["success"] == Value::Bool(false)

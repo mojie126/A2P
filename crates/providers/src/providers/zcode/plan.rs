@@ -135,7 +135,9 @@ pub(super) fn build_request(
 
 fn captcha_pool_empty(provider_id: &str) -> GatewayError {
     let message = "上游当前要求套餐池（Start Plan）推理请求完成人机验证，但本机令牌池为空：\
-         请打开主窗口或浏览器面板页补充令牌；这不是账号失效或套餐额度不足";
+         令牌由打开着的面板页面自动铸造（主窗口或浏览器打开本网关的面板页并保持页面开启）；\
+         远程 / headless 部署（Docker、服务器）没有常开的界面，请用浏览器打开网关面板页补池；\
+         这不是账号失效或套餐额度不足";
     if crate::readiness::hold(provider_id, message) {
         logging::log(
             "[Routing]",
