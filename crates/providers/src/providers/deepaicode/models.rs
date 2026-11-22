@@ -68,6 +68,10 @@ fn fallback_models() -> Vec<Value> {
                 "premier": *theos > 0,
                 "theosPerRequest": theos.to_string(),
                 "free": *theos == 0,
+                // 网关能力位只认 supportsImages 布尔，不推断 input 模态数组；
+                // 缺了它整家在辅助识图分组里恒为「不支持识图」
+                "supportsImages": input.contains(&"image"),
+                "supportsToolCall": true,
             });
             if let Some(label) = billing_label(Some(*theos as f64), *theos > 0) {
                 record["credits"] = json!(label);
@@ -145,6 +149,13 @@ fn normalize_models(payload: &Value) -> Vec<Value> {
             .to_string();
         let premier = record.get("premier").and_then(Value::as_bool).unwrap_or(false);
         record["free"] = json!(if theos.is_empty() { !premier } else { theos == "0" || theos == "0.0" || theos == "0.00" });
+        // 上游目录用 `input` 模态数组声明图片输入；映射成网关能力位，
+        // 未声明 input 的条目不凭空给 true（在线清单与静态快照同口径）
+        if record.get("supportsImages").is_none() {
+            let images = record.get("input").and_then(Value::as_array)
+                .is_some_and(|modalities| modalities.iter().any(|kind| kind.as_str() == Some("image")));
+            record["supportsImages"] = json!(images);
+        }
         let theos_value = theos.trim().parse::<f64>().ok().filter(|value| value.is_finite());
         if let Some(label) = billing_label(theos_value, premier) {
             record["credits"] = json!(label);
