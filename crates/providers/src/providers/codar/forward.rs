@@ -155,7 +155,6 @@ async fn forward(
         request.wire_model.clone()
     };
     let protocol = models::protocol_of_model(&model);
-    let authentication = models::authentication_of_model(&model);
     // 业务接口优先使用 API Key：登录凭据被上游限制为科搭官方客户端
     let token = credentials.business_token().to_string();
     let (url, body, headers) = match protocol.as_str() {
@@ -177,11 +176,10 @@ async fn forward(
                         .to_string(),
                 ),
             ];
-            if authentication == "x-api-key" {
-                headers.push(("x-api-key".to_string(), token.clone()));
-            } else {
-                headers.push(("Authorization".to_string(), format!("Bearer {token}")));
-            }
+            // 上游 anthropic 端点（/v1/messages）对 `x-api-key` 头回 client 门禁
+            // 403，`Authorization: Bearer` 同值放行（2026-11-22 按模型分头对照确认）——
+            // 鉴权统一走 Bearer，不再按目录的 authentication 标注分头型
+            headers.push(("Authorization".to_string(), format!("Bearer {token}")));
             (
                 format!("{}{}", endpoints::API_BASE, endpoints::ANTHROPIC),
                 body,

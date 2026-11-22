@@ -23,20 +23,19 @@ struct CatalogState {
 
 static STATE: LazyLock<Mutex<Option<CatalogState>>> = LazyLock::new(|| Mutex::new(None));
 
-/// 模型 id → (协议, 鉴权方式)。
-static MODEL_META: LazyLock<Mutex<HashMap<String, (String, String)>>> =
+/// 模型 id → 协议。
+static MODEL_META: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(fallback_meta()));
 
 /// 2026-11-19 实时目录快照。
 ///
-/// `(id, 上下文, 输出上限, 支持图片, 协议, 鉴权, 倍率文案, 输入价, 输出价, 缓存输入价)`；
+/// `(id, 上下文, 输出上限, 支持图片, 协议, 倍率文案, 输入价, 输出价, 缓存输入价)`；
 /// 价格单位为人民币元 / 百万 tokens（上游 `pricing.unit = per_million_tokens`）。
 type Row = (
     &'static str,
     i64,
     i64,
     bool,
-    &'static str,
     &'static str,
     &'static str,
     f64,
@@ -46,42 +45,40 @@ type Row = (
 
 fn rows() -> &'static [Row] {
     &[
-        ("auto", 1_000_000, 393_216, true, "chat", "bearer", "0.20x", 2.0, 8.0, 0.04),
-        ("deepseek-v4.1-flash", 1_000_000, 393_216, true, "chat", "bearer", "0.20x", 2.0, 8.0, 0.04),
-        ("deepseek-v4.1-flash-economy", 1_000_000, 393_216, true, "chat", "bearer", "0.12x", 1.2, 4.8, 0.024),
-        ("deepseek-v4-pro", 1_000_000, 393_216, false, "chat", "bearer", "0.95x", 9.0, 27.0, 0.3),
-        ("deepseek-v4-flash", 1_000_000, 393_216, true, "chat", "bearer", "0.20x", 2.0, 8.0, 0.04),
-        ("gemini-4-argon", 1_048_576, 65_536, true, "chat", "bearer", "0.55x", 4.0, 20.0, 0.2),
-        ("gemini-4-argon-official", 1_048_576, 65_536, true, "chat", "bearer", "3.28x", 24.0, 120.0, 1.2),
-        ("gpt-5.6-sol", 1_050_000, 128_000, true, "chat", "bearer", "0.77x", 4.0, 24.0, 0.4),
-        ("gpt-6-astra", 1_050_000, 128_000, true, "chat", "bearer", "1.48x", 8.0, 40.0, 0.8),
-        ("gpt-6.1-sol", 1_050_000, 128_000, true, "chat", "bearer", "0.30x", 1.6, 8.0, 0.16),
-        ("gpt-6.2-astra", 1_050_000, 128_000, true, "chat", "bearer", "0.87x", 6.4, 32.0, 0.32),
-        ("gpt-6.2-sol", 1_050_000, 128_000, true, "chat", "bearer", "0.30x", 1.6, 8.0, 0.16),
-        ("gpt-6-sol", 1_050_000, 128_000, true, "chat", "bearer", "0.30x", 1.6, 8.0, 0.16),
-        ("glm-5.2", 1_000_000, 131_072, false, "chat", "bearer", "2.57x", 8.0, 28.0, 2.0),
-        ("glm-5.3", 1_000_000, 131_072, false, "chat", "bearer", "2.57x", 8.0, 28.0, 2.0),
-        ("glm-5.3-flash", 1_000_000, 131_072, true, "chat", "bearer", "0.29x", 0.8, 2.8, 0.23),
-        ("claude-opus-5-5", 1_000_000, 128_000, true, "anthropic", "x-api-key", "1.37x", 10.0, 50.0, 0.5),
-        ("claude-opus-5-5-kiro", 1_000_000, 128_000, true, "anthropic", "x-api-key", "0.55x", 4.0, 20.0, 0.2),
-        ("claude-sonnet-5-5", 1_000_000, 128_000, true, "anthropic", "x-api-key", "0.93x", 5.0, 25.0, 0.5),
-        ("claude-sonnet-5-5-kiro", 1_000_000, 128_000, true, "anthropic", "x-api-key", "0.37x", 2.0, 10.0, 0.2),
+        ("auto", 1_000_000, 393_216, true, "chat", "0.20x", 2.0, 8.0, 0.04),
+        ("deepseek-v4.1-flash", 1_000_000, 393_216, true, "chat", "0.20x", 2.0, 8.0, 0.04),
+        ("deepseek-v4.1-flash-economy", 1_000_000, 393_216, true, "chat", "0.12x", 1.2, 4.8, 0.024),
+        ("deepseek-v4-pro", 1_000_000, 393_216, false, "chat", "0.95x", 9.0, 27.0, 0.3),
+        ("deepseek-v4-flash", 1_000_000, 393_216, true, "chat", "0.20x", 2.0, 8.0, 0.04),
+        ("gemini-4-argon", 1_048_576, 65_536, true, "chat", "0.55x", 4.0, 20.0, 0.2),
+        ("gemini-4-argon-official", 1_048_576, 65_536, true, "chat", "3.28x", 24.0, 120.0, 1.2),
+        ("gpt-5.6-sol", 1_050_000, 128_000, true, "chat", "0.77x", 4.0, 24.0, 0.4),
+        ("gpt-6-astra", 1_050_000, 128_000, true, "chat", "1.48x", 8.0, 40.0, 0.8),
+        ("gpt-6.1-sol", 1_050_000, 128_000, true, "chat", "0.30x", 1.6, 8.0, 0.16),
+        ("gpt-6.2-astra", 1_050_000, 128_000, true, "chat", "0.87x", 6.4, 32.0, 0.32),
+        ("gpt-6.2-sol", 1_050_000, 128_000, true, "chat", "0.30x", 1.6, 8.0, 0.16),
+        ("gpt-6-sol", 1_050_000, 128_000, true, "chat", "0.30x", 1.6, 8.0, 0.16),
+        ("glm-5.2", 1_000_000, 131_072, false, "chat", "2.57x", 8.0, 28.0, 2.0),
+        ("glm-5.3", 1_000_000, 131_072, false, "chat", "2.57x", 8.0, 28.0, 2.0),
+        ("glm-5.3-flash", 1_000_000, 131_072, true, "chat", "0.29x", 0.8, 2.8, 0.23),
+        ("claude-opus-5-5", 1_000_000, 128_000, true, "anthropic", "1.37x", 10.0, 50.0, 0.5),
+        ("claude-opus-5-5-kiro", 1_000_000, 128_000, true, "anthropic", "0.55x", 4.0, 20.0, 0.2),
+        ("claude-sonnet-5-5", 1_000_000, 128_000, true, "anthropic", "0.93x", 5.0, 25.0, 0.5),
+        ("claude-sonnet-5-5-kiro", 1_000_000, 128_000, true, "anthropic", "0.37x", 2.0, 10.0, 0.2),
     ]
 }
 
-fn fallback_meta() -> HashMap<String, (String, String)> {
+fn fallback_meta() -> HashMap<String, String> {
     rows()
         .iter()
-        .map(|(id, _, _, _, protocol, auth, ..)| {
-            (id.to_string(), (protocol.to_string(), auth.to_string()))
-        })
+        .map(|(id, _, _, _, protocol, ..)| (id.to_string(), protocol.to_string()))
         .collect()
 }
 
 fn fallback_models() -> Vec<Value> {
     rows()
         .iter()
-        .map(|(id, context, output, images, protocol, auth, rate, input, out, cached)| {
+        .map(|(id, context, output, images, protocol, rate, input, out, cached)| {
             json!({
                 "id": id,
                 "name": id,
@@ -93,7 +90,6 @@ fn fallback_models() -> Vec<Value> {
                 "maxInputTokens": context,
                 "maxOutputTokens": output,
                 "isDefault": *id == "auto",
-                "authentication": auth,
                 "credits": rate,
                 "pricing": {
                     "currency": "CNY",
@@ -116,15 +112,6 @@ fn protocol_of(row: &Value) -> &str {
         "anthropic_messages" | "anthropic" => "anthropic",
         "openai_responses" | "responses" => "responses",
         _ => "chat",
-    }
-}
-
-fn authentication_of(row: &Value, protocol: &str) -> &'static str {
-    match row.get("authentication").and_then(Value::as_str) {
-        Some("x-api-key") => "x-api-key",
-        Some(_) => "bearer",
-        None if protocol == "anthropic" => "x-api-key",
-        None => "bearer",
     }
 }
 
@@ -151,8 +138,7 @@ fn normalize(payload: &Value) -> Vec<Value> {
             continue;
         }
         let protocol = protocol_of(&row);
-        let authentication = authentication_of(&row, protocol);
-        meta.insert(id.to_string(), (protocol.to_string(), authentication.to_string()));
+        meta.insert(id.to_string(), protocol.to_string());
         let name = ["display_name", "name"]
             .iter()
             .find_map(|key| row.get(*key).and_then(Value::as_str))
@@ -165,7 +151,6 @@ fn normalize(payload: &Value) -> Vec<Value> {
             "kind": "chat",
             "protocol": protocol,
             "isDefault": id == "auto",
-            "authentication": authentication,
         });
         if let Some(value) = row["capabilities"]["function_tools"].as_bool() {
             model["supportsToolCall"] = json!(value);
@@ -318,17 +303,8 @@ pub fn protocol_of_model(id: &str) -> String {
     MODEL_META
         .lock()
         .ok()
-        .and_then(|meta| meta.get(id).map(|entry| entry.0.clone()))
+        .and_then(|meta| meta.get(id).cloned())
         .unwrap_or_else(|| "chat".to_string())
-}
-
-/// 模型的鉴权方式（`bearer` / `x-api-key`）。
-pub fn authentication_of_model(id: &str) -> String {
-    MODEL_META
-        .lock()
-        .ok()
-        .and_then(|meta| meta.get(id).map(|entry| entry.1.clone()))
-        .unwrap_or_else(|| "bearer".to_string())
 }
 
 #[cfg(test)]
@@ -347,7 +323,6 @@ mod tests {
         let ids: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
         assert_eq!(ids, vec!["a", "claude-x", "r"]);
         assert_eq!(protocol_of_model("claude-x"), "anthropic");
-        assert_eq!(authentication_of_model("claude-x"), "x-api-key");
         assert_eq!(protocol_of_model("r"), "responses");
     }
 
