@@ -810,12 +810,18 @@ fn amount_json(value: f64) -> Value {
 /// ── 三个口径都是「上游给什么写什么」─────────────────────────
 ///   * 额度**逐包选层**：有 `credits_limit` 的按积分（SOLO 积分制真正扣的那笔
 ///     钱），没有的退回套餐的 `basic_usage_limit`（订阅制账户只有这个）；
-///     两层都没有的包仍然出一行（名字 + 到期时刻），但**一个数都不写**。
+///     两层都没有的包不再出明细行，见下一段。
 ///   * `grantAt` ← `entitlement_base_info.start_time`（这份包开始/发放的时刻）、
 ///     `expireAt` ← 顶层 `expire_time`，没给才退回 `end_time`
 ///     （两者分工见 [`Pack::expire_time`] 的说明）。
 ///   * 缺失一律**不写这个键** —— 文件头第 1 条纪律：写成 0 会让界面把「没读到」
 ///     画成「只剩 0」。
+///
+/// ── 余额为 0 与没有任何额度字段的包不进入明细 ───────────────
+/// 上游会把免费档与已花完的签到包也留在权益清单里，这类包只会带来「余量未知」
+/// 与几十行「已用完」噪音，还会被账号行的到期提醒统计进去。因此剩余读到 0、
+/// 或三层 quota 都没有额度字段的包**整行不产出**；「不限」与仍有正余额的包
+/// 照常产出，到期提示只可能来自还能花的那部分。
 ///
 /// `doc_unit` 是主读数的单位：行自己的单位与它相同时不写 `unit` 键
 /// （同单位的行不必每行再标一遍「积分」）。
@@ -854,6 +860,11 @@ pub fn credit_rows(packs: &[Pack], is_cn: bool, doc_unit: &str) -> Vec<Value> {
         } else {
             ("", None, None, None)
         };
+        // 剩余读到 0 或三层 quota 都没有额度字段：这份包对界面只剩噪音，
+        // 不产出明细行，也不会再被账号行的到期提醒统计。
+        if !unlimited && !matches!(remain, Some(value) if value > 0.0) {
+            continue;
+        }
         for (key, value) in [("total", total), ("used", used), ("remain", remain)] {
             if let Some(value) = value {
                 row.insert(key.to_string(), amount_json(value));
@@ -1204,5 +1215,73 @@ pub async fn query_usage(ctx: &PluginCtx, account_id: &str) -> Result<Value, Gat
     let credential = renew_if_due(ctx, &record, &credential, proxy.as_ref()).await?;
     let readout = read(&credential, proxy.as_ref()).await?;
     Ok(document(&readout, true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pack(quota: PackQuota, usage: PackUsage) -> Pack {
+        Pack { base_quota: quota, usage, ..Pack::default() }
+    }
+
+    #[test]
+    fn credit_rows_skip_spent_and_unknown_packs() {
+        let packs = vec![
+            // 已花完：100 / 100
+            pack(
+                PackQuota { credits_limit: Some(100), ..PackQuota::default() },
+                PackUsage { credits_amount: Some(100.0), ..PackUsage::default() },
+            ),
+            // 没有任何额度字段：免费档空包
+            pack(PackQuota::default(), PackUsage::default()),
+            // 面额为 0
+            pack(
+                PackQuota { credits_limit: Some(0), ..PackQuota::default() },
+                PackUsage::default(),
+            ),
+            // 仍有正余额
+            pack(
+                PackQuota { credits_limit: Some(100), ..PackQuota::default() },
+                PackUsage { credits_amount: Some(40.0), ..PackUsage::default() },
+            ),
+            // 不限
+            pack(
+                PackQuota { credits_limit: Some(-1), ..PackQuota::default() },
+                PackUsage::default(),
+            ),
+        ];
+        let rows = credit_rows(&packs, true, "积分");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| row["remain"] == json!(60)));
+        assert!(rows.iter().any(|row| row["unlimited"] == json!(true)));
+    }
+
+    #[test]
+    fn credit_rows_keep_positive_basic_pack_with_bonus() {
+        let packs = vec![
+            // 主额度超支但 bonus 仍有正剩余：100 + 50 - 120 - 10 = 20
+            pack(
+                PackQuota {
+                    basic_usage_limit: Some(100),
+                    bonus_usage_limit: Some(50),
+                    ..PackQuota::default()
+                },
+                PackUsage {
+                    basic_amount: Some(120),
+                    bonus_amount: Some(10),
+                    ..PackUsage::default()
+                },
+            ),
+            // 主额度刚好花完
+            pack(
+                PackQuota { basic_usage_limit: Some(100), ..PackQuota::default() },
+                PackUsage { basic_amount: Some(100), ..PackUsage::default() },
+            ),
+        ];
+        let rows = credit_rows(&packs, true, "额度");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["remain"], json!(20));
+    }
 }
 
