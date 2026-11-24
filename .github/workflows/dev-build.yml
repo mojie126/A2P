@@ -30,16 +30,29 @@ on:
 
 permissions:
   contents: write
+  actions: write
+
+concurrency:
+  group: dev-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  cleanup:
-    name: 清理构建缓存
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
     steps:
+      - uses: actions/checkout@v7
+
+      # 清理缓存只需在 Linux 任务里做一次，不再为它单独起一个任务。
       - name: 清理旧 Rust 缓存
-        if: inputs.clean_cache
+        if: inputs.clean_cache && runner.os == 'Linux'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -54,21 +67,6 @@ jobs:
             fi
           done <<< "$ids"
           echo "已清理旧 Rust 缓存 $count 条"
-
-  build:
-    needs:
-      - cleanup
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
