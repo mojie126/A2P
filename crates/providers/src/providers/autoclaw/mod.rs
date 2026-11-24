@@ -84,16 +84,8 @@ use region::Region;
 // provider id 的唯一事实来源在 `region`（`PROVIDER_ID_CN` / `PROVIDER_ID_INTL`）：
 // 插件侧没有 `ProviderKind` 枚举，`Region::provider_id()` 就是那个映射点。
 
-/// 客户端版本号（源实现 `createUpstreamClient` 的 `desktopAppVersion` 默认值；
-/// `server.mjs` 从不覆盖它，所以这里是常量而不是配置项）。
-///
-/// 它进 `X-Version` 头：上游按它识别 AutoClaw 客户端版本，改动会让上游按不同
-/// 的兼容路径解释请求。
-const DESKTOP_APP_VERSION: &str = "1.17.8";
-
-/// 上游语言 / 通道（源实现的 `lang` / `channel` 默认值，`server.mjs` 同样不覆盖）
+/// 上游语言（源实现的 `lang` 默认值，`server.mjs` 同样不覆盖）。
 const CLIENT_LANG: &str = "zh-CN";
-const CLIENT_CHANNEL: &str = "official";
 
 /// 客户端透传头：`(上游头名, 客户端头名)`（源 `modelProxyUpstreamHeaders` 的表）。
 ///
@@ -263,13 +255,14 @@ impl Provider for AutoClawProvider {
                 // 源实现给的是 `Accept: */*`（LLM 代理两种响应形态都可能回）
                 ("Accept".to_string(), "*/*".to_string()),
             ];
-            headers.extend(brand_headers());
+            let request_id = crate::ids::uuid_v4();
+            headers.extend(brand_headers(self.region, &request_id));
             headers.push((
                 // 认证头名照抄源实现（`X-Authorization`，不是 `Authorization`）
                 "X-Authorization".to_string(),
                 format!("Bearer {token}"),
             ));
-            headers.push(("X-Request-Id".to_string(), crate::ids::uuid_v4()));
+            headers.push(("X-Request-Id".to_string(), request_id));
             headers.push(("X-Request-Model".to_string(), route.route_model_id.clone()));
             headers.extend(passthrough_session_headers(&client));
             let mut out_body = req.body.clone();
@@ -279,7 +272,16 @@ impl Provider for AutoClawProvider {
                     Value::String(route.body_model_id.clone()),
                 );
             }
-            normalize_max_tokens(&mut out_body);
+            // 国内 2.1.0 托管网关拒收 max_tokens 系字段（Magpie 实测），
+            // 国际版旧网关仍按「小值抬到 10000」的规则处理。
+            if self.region == Region::Cn {
+                if let Some(object) = out_body.as_object_mut() {
+                    object.remove("max_tokens");
+                    object.remove("max_completion_tokens");
+                }
+            } else {
+                normalize_max_tokens(&mut out_body);
+            }
             prompt::normalize(&mut out_body);
             // 最后一道：删掉客户端自带的 `metadata`（第四道闸，issue #388）。
             // 放在 prompt::normalize 之后，因为它只动 `messages`，两者互不干扰。
@@ -767,16 +769,26 @@ async fn persist_refresh(
 /// 源实现有它，照抄过来后上游自 2026-09-22 起对这个值区别对待：带 `zcode`
 /// 稳定 `403 pay-view`（`code 810001`）或 406，不带（或换 `autoclaw`）200 ——
 /// 同一账号、同一请求、只改这一个头的实测结论。
-fn brand_headers() -> Vec<(String, String)> {
-    vec![
+fn brand_headers(region: Region, request_id: &str) -> Vec<(String, String)> {
+    let mut headers = vec![
         ("X-Product".to_string(), "autoclaw".to_string()),
         ("X-Client-Type".to_string(), "pc".to_string()),
         ("X-Tm".to_string(), platform_tm().to_string()),
-        ("X-Version".to_string(), DESKTOP_APP_VERSION.to_string()),
+        ("X-Version".to_string(), region.chat_client_version().to_string()),
         ("X-Lang".to_string(), CLIENT_LANG.to_string()),
-        ("X-Channel".to_string(), CLIENT_CHANNEL.to_string()),
+        ("X-Channel".to_string(), region.chat_channel().to_string()),
         ("x_trace_id".to_string(), "autoclaw-desktop".to_string()),
-    ]
+    ];
+    // 国内 2.1.0 客户端的托管网关指纹：带 UA、请求/追踪同号与固定 Agent 标识。
+    // 国际版保持原有头集合，避免在登录链已停用的地区做未验证改动。
+    if let Some(user_agent) = region.chat_user_agent() {
+        headers.push(("User-Agent".to_string(), user_agent.to_string()));
+    }
+    if region == Region::Cn {
+        headers.push(("X-Trace-Id".to_string(), request_id.to_string()));
+        headers.push(("X-Agent-Id".to_string(), "main".to_string()));
+    }
+    headers
 }
 
 /// 平台标识（源实现 `platformTm()`）。

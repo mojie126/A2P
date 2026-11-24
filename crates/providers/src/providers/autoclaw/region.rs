@@ -8,10 +8,12 @@
 //!
 //! ```text
 //!            userapi（账号 / 积分 / 签到）                       LLM 代理
-//!   国内  https://autoglm-acceleration-api.zhipuai.cn  .../autoclaw-proxy/proxy/autoclaw
+//!   国内  https://autoglm-api.zhipuai.cn               .../autoclaw-proxy/proxy/autoclaw
 //!   国际  https://autoglm-api.autoglm.ai               .../autoclaw-proxy/proxy/autoclaw
 //! ```
 //!
+//! 国内版模型目录仍由托管网关 `autoglm-acceleration-api.zhipuai.cn` 下发，
+//! 与对话域名分开（见 [`Region::managed_base_url`]）。
 //! 因此「这一家的域名」不能是模块级常量 —— 那是改造前只有一家时的写法。
 //! 本文件是**地区 → 域名 / 身份 / 环境变量**的唯一事实来源，别处不要再写
 //! `"https://autoglm-api.autoglm.ai"` 这类字面量。
@@ -127,15 +129,70 @@ impl Region {
     /// 上游 LLM 代理基址（**含**尾部的 `/autoclaw`）
     pub fn upstream_base_url(self) -> &'static str {
         match self {
-            Self::Cn => "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
+            // 国内 2.1.0 客户端把对话迁到账号域；模型目录仍走托管网关，
+            // 两者不能再用同一个常量（见 [`Self::managed_base_url`]）。
+            Self::Cn => "https://autoglm-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
             Self::Intl => "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw",
+        }
+    }
+
+    /// 托管网关基址：国内版模型目录仍在这里。
+    ///
+    /// 国际版没有独立的托管网关，与对话同域。
+    pub fn managed_base_url(self) -> &'static str {
+        match self {
+            Self::Cn => "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
+            Self::Intl => self.upstream_base_url(),
+        }
+    }
+
+    /// 对话请求申报的客户端版本。
+    ///
+    /// 国内 2.1.0 是 Magpie 实测的当前托管网关客户端；国际版保持本地已验证的
+    /// 1.17.8，避免在登录链已停用的地区做未验证改动。
+    pub fn chat_client_version(self) -> &'static str {
+        match self {
+            Self::Cn => "2.1.0",
+            Self::Intl => "1.17.8",
+        }
+    }
+
+    /// 对话请求申报的渠道。
+    pub fn chat_channel(self) -> &'static str {
+        match self {
+            Self::Cn => "AutoClaw26",
+            Self::Intl => "official",
+        }
+    }
+
+    /// 对话请求的 User-Agent；`None` 表示沿用传输层默认值（国际版保持原样）。
+    pub fn chat_user_agent(self) -> Option<&'static str> {
+        match self {
+            Self::Cn => Some("AutoClaw/2.1.0 (win-x64)"),
+            Self::Intl => None,
+        }
+    }
+
+    /// 国内版模型目录请求申报的客户端版本与渠道（托管网关按它下发清单）。
+    pub fn catalog_client_version(self) -> &'static str {
+        match self {
+            Self::Cn => "2.1.0",
+            Self::Intl => super::refresh::CLIENT_VERSION,
+        }
+    }
+
+    /// 国内版模型目录请求申报的客户端渠道（托管网关按它下发清单）。
+    pub fn catalog_channel(self) -> &'static str {
+        match self {
+            Self::Cn => "AutoClaw26",
+            Self::Intl => "official",
         }
     }
 
     /// 用户中心（userapi）基址 —— 刷新 / 积分 / 签到 / 登录都在这个域
     pub fn userapi_base_url(self) -> &'static str {
         match self {
-            Self::Cn => "https://autoglm-acceleration-api.zhipuai.cn",
+            Self::Cn => "https://autoglm-api.zhipuai.cn",
             Self::Intl => "https://autoglm-api.autoglm.ai",
         }
     }
@@ -186,5 +243,40 @@ impl Region {
             Self::Cn => "user-",
             Self::Intl => "intl-user-",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Region;
+
+    #[test]
+    fn cn_chat_moves_to_account_host_while_catalog_stays_managed() {
+        assert_eq!(
+            Region::Cn.upstream_base_url(),
+            "https://autoglm-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw"
+        );
+        assert_eq!(
+            Region::Cn.userapi_base_url(),
+            "https://autoglm-api.zhipuai.cn"
+        );
+        assert_eq!(
+            Region::Cn.managed_base_url(),
+            "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw"
+        );
+    }
+
+    #[test]
+    fn cn_uses_2_1_0_client_profile_and_intl_keeps_existing() {
+        assert_eq!(Region::Cn.chat_client_version(), "2.1.0");
+        assert_eq!(Region::Cn.chat_channel(), "AutoClaw26");
+        assert_eq!(Region::Cn.chat_user_agent(), Some("AutoClaw/2.1.0 (win-x64)"));
+        assert_eq!(Region::Cn.catalog_client_version(), "2.1.0");
+        assert_eq!(Region::Cn.catalog_channel(), "AutoClaw26");
+
+        assert_eq!(Region::Intl.chat_client_version(), "1.17.8");
+        assert_eq!(Region::Intl.chat_channel(), "official");
+        assert_eq!(Region::Intl.chat_user_agent(), None);
+        assert_eq!(Region::Intl.managed_base_url(), Region::Intl.upstream_base_url());
     }
 }

@@ -297,6 +297,18 @@ pub fn upstream_base_url(region: Region) -> String {
         .unwrap_or_else(|| region.upstream_base_url().to_string())
 }
 
+/// 模型目录的托管网关基址（国内版与对话不同域）。
+///
+/// 覆盖顺序：`{前缀}CATALOG_BASE_URL` → `{前缀}UPSTREAM_BASE_URL` → 地区默认。
+/// 保留第二个回退是为了让此前用 `UPSTREAM_BASE_URL` 指向自建网关的配置在
+/// 升级后仍然同时覆盖对话与目录，不出现「对话换到了新地址、目录还在旧地址」。
+pub fn catalog_base_url(region: Region) -> String {
+    region
+        .env_override("CATALOG_BASE_URL")
+        .or_else(|| region.env_override("UPSTREAM_BASE_URL"))
+        .unwrap_or_else(|| region.managed_base_url().to_string())
+}
+
 // ─── 文件读取（形态防御 + mtime）─────────────────────────────
 
 /// 一次文件读取的结果：JSON 对象 + 修改时间（毫秒）

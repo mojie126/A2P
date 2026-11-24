@@ -43,7 +43,7 @@ use super::region::Region;
 /// ```
 /// 取 `lastIndexOf` 而不是首次出现：域名里也可能出现 `/proxy/` 片段。
 fn config_base_url(region: Region) -> String {
-    let upstream = super::credentials::upstream_base_url(region);
+    let upstream = super::credentials::catalog_base_url(region);
     match upstream.rfind("/proxy/") {
         Some(index) => format!("{}/", &upstream[..index + "/proxy/".len()]),
         // 没有 `/proxy/` 时按 `URL.origin + /autoclaw-proxy/proxy/` 拼
@@ -275,7 +275,22 @@ pub async fn refresh(
     }
 
     let url = format!("{}{MODEL_CONFIG_PATH}", config_base_url(region));
-    let headers = super::refresh::signed_auth_headers(&credentials.token);
+    let mut headers = super::refresh::signed_auth_headers(&credentials.token);
+    // 国内 2.1.0 的托管目录按新版客户端渠道发放清单；国际版保持原有签名头。
+    if region == Region::Cn {
+        // 新版托管网关的目录请求不带 Harness 标记（对齐 Magpie 的 catalog 头）。
+        headers.retain(|(name, _)| name != "X-Harness-Type");
+        for (name, value) in &mut headers {
+            if name.as_str() == "X-Version" {
+                *value = region.catalog_client_version().to_string();
+            } else if name.as_str() == "X-Channel" {
+                *value = region.catalog_channel().to_string();
+            }
+        }
+        if let Some(user_agent) = region.chat_user_agent() {
+            headers.push(("User-Agent".to_string(), user_agent.to_string()));
+        }
+    }
     let outcome = send_raw(
         "GET",
         &url,
