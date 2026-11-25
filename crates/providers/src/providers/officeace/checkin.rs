@@ -55,11 +55,20 @@ async fn claim_inner(
     }
     control::resolve_project(ctx, &mut credential).await?;
     let claimed = control::claim_bonus(ctx, &mut credential).await?;
-    let items = claimed.get("bonus_skus").and_then(Value::as_array)
-        .ok_or_else(|| GatewayError::with_status(502, "官方未返回有效的奖励领取结果，请查询积分后再操作"))?;
+    // 上游把「本次没有新奖励」写成 `bonus_skus: null`，与空数组同义
+    let item_count = match claimed.get("bonus_skus") {
+        Some(Value::Array(items)) => items.len(),
+        Some(Value::Null) => 0,
+        _ => {
+            return Err(GatewayError::with_status(
+                502,
+                "官方未返回有效的奖励领取结果，请查询积分后再操作",
+            ))
+        }
+    };
     let bonuses = subscription::bonuses_of(&claimed);
     let gained: f64 = bonuses.iter().map(subscription::Bonus::remaining).sum();
-    if items.len() != bonuses.len() || !gained.is_finite() || !items.is_empty() && gained <= 0.0 {
+    if item_count != bonuses.len() || !gained.is_finite() || item_count != 0 && gained <= 0.0 {
         return Err(GatewayError::with_status(502, "官方返回了奖励条目，但未能确认到账积分，请查询积分明细"));
     }
     super::onboarding::mark_claimed(ctx, account_id, &bonuses).await;

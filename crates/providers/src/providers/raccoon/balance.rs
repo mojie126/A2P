@@ -216,15 +216,33 @@ pub(super) async fn request_json_ex(
         ),
     ];
     headers.extend(extra_headers.iter().cloned());
-    let response = send_raw(method, &url, None, &headers, None, Some(timeout_ms))
-        .await
-        .map_err(|error| {
-            if error.is_timeout() {
-                GatewayError::with_status(504, "积分查询超时")
-            } else {
-                GatewayError::with_status(502, format!("积分查询失败: {error}"))
-            }
-        })?;
+    let request = || async {
+        send_raw(method, &url, None, &headers, None, Some(timeout_ms))
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    GatewayError::with_status(504, "积分查询超时")
+                } else {
+                    GatewayError::with_status(502, format!("积分查询失败: {error}"))
+                }
+            })
+    };
+    let mut response = request().await?;
+    // IAM 首次迁移：业务码 200901 时确认一次后重试同一请求
+    if !token.is_empty()
+        && response
+            .payload
+            .as_ref()
+            .and_then(super::upstream_errors::business_code)
+            == Some(200_901)
+    {
+        super::iam::confirm(token).await?;
+        response = request().await?;
+    }
+    if response.edge_system_error {
+        return Err(GatewayError::with_status(403, "小浣熊上游边缘节点拒绝（x-tt-system-error）")
+            .with_code("raccoon_edge_403"));
+    }
     let payload = response.payload.unwrap_or(Value::Null);
     if response.status == 401 || super::upstream_errors::token_expired(&payload) {
         return Err(GatewayError::with_status(401, "登录态已过期，无法查询积分"));

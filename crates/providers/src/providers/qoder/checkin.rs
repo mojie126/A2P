@@ -106,6 +106,13 @@ pub async fn claim_daily_checkin(
     claim_from(site, session).await
 }
 
+/// 当前账号是否为免费版：免费版自 2026-11-19 起不再发放每日积分，按不适用回报
+async fn free_tier(session: &CampaignSession) -> bool {
+    super::balance::plan_name(&session.credentials, session.proxy.as_ref())
+        .await
+        .is_some_and(|name| name.eq_ignore_ascii_case("free"))
+}
+
 /// 活动列表解析 + 领取（两个地区共用的收尾）。
 async fn claim_from(site: Site, session: CampaignSession) -> Result<Value, GatewayError> {
     let rows = session.list.get("campaigns").and_then(Value::as_array)
@@ -134,6 +141,17 @@ async fn claim_from(site: Site, session: CampaignSession) -> Result<Value, Gatew
     }
 
     let Some(target) = claimable else {
+        // 免费版账号不会下发积分活动；如实说明不适用，避免与「今天没得领」混淆
+        if !claimed && free_tier(&session).await {
+            return Ok(json!({
+                "success": false,
+                "outcome": "ineligible",
+                "msg": format!(
+                    "当前为免费版账号，官方自 2026-11-19 起已停止免费版每日积分领取（仅试用或付费订阅可用） · {}",
+                    site.display_name()
+                ),
+            }));
+        }
         return Ok(no_claim(site, claimed, session.risk_note));
     };
     let campaign_id = target.get("campaignId").and_then(Value::as_str).unwrap_or("");

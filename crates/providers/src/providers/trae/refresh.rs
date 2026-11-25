@@ -153,6 +153,7 @@ pub fn parse_refresh_response(body: &str) -> Result<(String, String, i64), Strin
                 let expires = ["TokenExpireAt", "tokenExpireAt", "ExpiresAt", "expiresAt"]
                     .iter()
                     .find_map(|field| timestamp_field(object.get(*field)))
+                    .or_else(|| duration_field(object))
                     .unwrap_or(0);
                 return Ok((token, refresh, normalize_expires_at(expires)));
             }
@@ -168,6 +169,22 @@ fn timestamp_field(value: Option<&Value>) -> Option<i64> {
         Value::String(text) => text.trim().parse::<f64>().ok().map(|raw| raw as i64),
         _ => None,
     }
+}
+
+/// 上游只给有效期时长时，按当前时刻换算成毫秒时间戳。
+///
+/// 取值单位不固定：大于 10 亿视为毫秒，否则按秒处理（与上游两套返回形态一致）。
+fn duration_field(object: &serde_json::Map<String, Value>) -> Option<i64> {
+    let duration = ["TokenExpireDuration", "tokenExpireDuration", "ExpiresIn", "expiresIn"]
+        .iter()
+        .find_map(|field| timestamp_field(object.get(*field)))
+        .filter(|value| *value > 0)?;
+    let delta_ms = if duration > 1_000_000_000 {
+        duration
+    } else {
+        duration.saturating_mul(1000)
+    };
+    Some(crate::logging::now_ms().saturating_add(delta_ms))
 }
 
 /// 秒与毫秒的归一（同 `Credential::expires_at_ms` 的判据）。
@@ -264,8 +281,11 @@ pub async fn refresh_once(
         }
     }
     // 4xx 语义原样透出（"凭据被拒（该重登）"与"上游挂了（该重试）"不能长一样）：
-    // 全轮失败时按最后一个状态判，其它情况是 502。
-    let status = if errors.iter().any(|error| error.contains("HTTP 401")) { 401 } else { 502 };
+    // 全轮失败时按最后一个状态判，其它情况是 502；刷新令牌失效文本按 401 处理
+    let unauthorized = errors.iter().any(|error| {
+        error.contains("HTTP 401") || error.to_lowercase().contains("refresh token is invalid")
+    });
+    let status = if unauthorized { 401 } else { 502 };
     Err(GatewayError::with_status(status, describe_candidates(urls, &errors)))
 }
 
@@ -295,3 +315,23 @@ fn trim(text: &str) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_response_uses_expire_duration_when_timestamp_missing() {
+        let body = r#"{"Result":{"Token":"at","RefreshToken":"rt","ExpiresIn":3600}}"#;
+        let (access, refresh, expires) = parse_refresh_response(body).expect("parse");
+        assert_eq!(access, "at");
+        assert_eq!(refresh, "rt");
+        assert!(expires > crate::logging::now_ms());
+    }
+
+    #[test]
+    fn refresh_response_prefers_explicit_timestamp() {
+        let body = r#"{"Result":{"Token":"at","TokenExpireAt":"1900000000000","ExpiresIn":60}}"#;
+        let (_, _, expires) = parse_refresh_response(body).expect("parse");
+        assert_eq!(expires, 1_900_000_000_000);
+    }
+}

@@ -128,6 +128,17 @@ pub fn stream_error_kind(code: i64, message: &str) -> ErrorKind {
 /// 劫持成 12 小时硬冷却。
 pub fn classify(status: u16, body: &str) -> ErrorKind {
     let lower = body.to_lowercase();
+    // 华为云/网关错误可能把原因放在 ResponseMetadata.Error 里而不是顶层 code
+    let meta_code = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/ResponseMetadata/Error/Code")
+                .or_else(|| value.pointer("/ResponseMetadata/Error/CodeN"))
+                .and_then(Value::as_str)
+                .map(str::to_ascii_lowercase)
+        })
+        .unwrap_or_default();
     if status == 413 {
         return ErrorKind::InputTooLarge;
     }
@@ -143,6 +154,12 @@ pub fn classify(status: u16, body: &str) -> ErrorKind {
     if status == 401 {
         // 参考实现这里遍历了一批"会话失效"文案标记，但无论命不命中都返回
         // 同一个类别 —— 那个循环是空转的，这里直接给结论。
+        return ErrorKind::SessionDead;
+    }
+    // 华为云网关的鉴权拒绝会以 4xx 返回，按标记归类为会话失效
+    if matches!(meta_code.as_str(), "unauthorized" | "invalidtoken" | "tokenexpired")
+        || lower.contains("refresh token is invalid")
+    {
         return ErrorKind::SessionDead;
     }
     if status == 429 {
@@ -187,6 +204,14 @@ pub fn error_event_fields(data: &Value) -> (i64, String) {
             value
                 .as_i64()
                 .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+        })
+        .or_else(|| {
+            data.pointer("/ResponseMetadata/Error/CodeN")
+                .and_then(|value| {
+                    value
+                        .as_i64()
+                        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+                })
         })
         .unwrap_or(0);
     let message = detail

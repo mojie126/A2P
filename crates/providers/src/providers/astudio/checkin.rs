@@ -56,6 +56,15 @@ pub async fn checkin(ctx: &PluginCtx, account: &str) -> Result<proto::CheckinRep
             message: Some("当前没有每日登录积分活动".into()),
         });
     }
+    // 当前套餐的每日登录积分为 0 时没有奖励可领，提前给出明确原因
+    if let Some(reason) = plan_zero_reason(&credentials, &config).await? {
+        return Ok(proto::CheckinReport {
+            outcome: proto::CheckinOutcome::Ineligible,
+            credit: None,
+            streak: None,
+            message: Some(reason),
+        });
+    }
     let before = match read_balance(&credentials).await {
         Ok(value) => value,
         Err(StudioError::Expired(message)) => return Err(message),
@@ -135,6 +144,55 @@ pub async fn checkin(ctx: &PluginCtx, account: &str) -> Result<proto::CheckinRep
 struct Balance {
     points: Option<f64>,
     spark: Option<f64>,
+}
+
+/// 当前套餐是否明确不发放每日登录积分：返回可读原因，有奖励或无法判定时返回 `None`
+async fn plan_zero_reason(
+    credentials: &Credentials,
+    config: &Value,
+) -> Result<Option<String>, String> {
+    let membership = match client::studio_json(credentials, endpoints::MEMBERSHIP_ME, "会员信息").await {
+        Ok(value) => value,
+        // 会话过期要如实上报，其余读取失败不阻断签到（宁可试一次）
+        Err(StudioError::Expired(message)) => return Err(message),
+        Err(_) => return Ok(None),
+    };
+    let Some(code) = membership
+        .get("planCode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(plan) = config
+        .get("plans")
+        .and_then(Value::as_array)
+        .and_then(|plans| {
+            plans.iter().find(|item| {
+                item.get("planCode")
+                    .and_then(Value::as_str)
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(code))
+            })
+        })
+    else {
+        return Ok(None);
+    };
+    let Some(points) = balance_number(plan.get("dailyLoginPoints")) else {
+        return Ok(None);
+    };
+    if points > 0.0 {
+        return Ok(None);
+    }
+    let display = plan
+        .get("planName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(code);
+    Ok(Some(format!(
+        "当前套餐（{display}）每日登录积分为 0，没有可领取的每日登录奖励"
+    )))
 }
 
 async fn read_balance(credentials: &Credentials) -> Result<Balance, StudioError> {

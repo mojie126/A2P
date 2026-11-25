@@ -318,6 +318,7 @@ pub(super) async fn request(
             status,
             ok: (200..300).contains(&status),
             payload: Some(payload),
+            edge_system_error: false,
         });
     }
     Err(GatewayError::with_status(401, "官网登录态被拒绝"))

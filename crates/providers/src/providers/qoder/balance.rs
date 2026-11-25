@@ -213,7 +213,9 @@ fn expiry_of(raw: &Value) -> Option<Value> {
 }
 
 /// 套餐名（`plan_tier_name`）。**best-effort**：失败只让这一行不显示。
-async fn plan_name(credentials: &Credentials, proxy: Option<&ResolvedProxy>) -> Option<String> {
+///
+/// 签到侧也用它判断免费版账号（`pub(super)`），因此不能收窄成私有
+pub(super) async fn plan_name(credentials: &Credentials, proxy: Option<&ResolvedProxy>) -> Option<String> {
     let response = auth::request(
         "GET",
         &format!("{}{}", credentials.site.open_api(), endpoints::PLAN_PATH),

@@ -179,9 +179,8 @@ impl Provider for ZcodeProvider {
                 model_refresh: false,
                 // 套餐余额（billing + 监控两条通道）
                 usage: true,
-                // 每日签到 = 领当天那份赠送套餐（见 `checkin` 模块头）：
-                // 上游每天下发一份带日期段的新套餐，点一下就领 —— 那就是本家的签到
-                checkin: true,
+                // 每日赠送套餐活动已下架，不再参与每日签到（`checkin` 模块保留领取实现，供偶发活动使用）
+                checkin: false,
                 claims: true,
                 // 服务端中介的 CLI 轮询：授权地址由上游给、回调在上游域名终结，
                 // 因此插件声明「轮询型」由网关发起并轮询（见 `login.rs`）
@@ -240,25 +239,16 @@ impl Provider for ZcodeProvider {
                 expiry: vec!["expiresAt".to_string()],
                 ..Default::default()
             })
-            // 签到能力申报：本家**有**每日签到 —— 就是「领当天那份赠送套餐」
-            // （见 `checkin` 模块头）。上游每天下发一份带日期段的新套餐，点一下
-            // 就领，那一动作就是这一家的签到。
-            //
-            // 同时申报 `plans: true`：签到中心「活动福利」那张卡也按这一位列
-            // 账号（见 `api::checkin_center` 的 `plan_rows`），两处展示的是同一
-            // 批账号、同一份活动。
+            // 签到能力申报：官方每日赠送套餐活动已下架，不再参与每日签到
+            // （`daily: false`、`modes` 为空），仅保留 `plans: true` 让签到中心的
+            // 「活动福利」卡片继续按活动展示偶发福利
             .with_checkin(proto::CheckinInfo {
                 description: Some(format!(
-                    "每日赠送套餐领取（每天 19:00 起可领）· {}",
+                    "偶尔开放赠送套餐活动（每日签到已下架，有活动时可在活动福利查询并领取）· {}",
                     self.region.label()
                 )),
-                // 只申报 `Checkin` 一档：签到中心按它给一颗「签到」按钮。
-                // 不再申报 `Claim` —— 那一档也是「探测 + 领取」，与本家的签到
-                // 是同一个动作，两颗按钮并排只会让用户以为它们不一样。
-                modes: vec![proto::CheckinMode::Checkin],
-                // 参与每日签到：定时任务按 `core::auto_checkin::times` 的 19:01
-                // 触发（那个时刻与 `checkin::daily_window_start` 是同一份事实）。
-                daily: true,
+                modes: Vec::new(),
+                daily: false,
                 plans: true,
                 ..Default::default()
             })

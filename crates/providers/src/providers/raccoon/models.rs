@@ -217,7 +217,19 @@ pub async fn refresh(
     if let Err(message) = super::headers::append_org(&mut headers, org_code) {
         return proto::RefreshOutcome::failed(message);
     }
-    let outcome = send_raw("GET", &url, None, &headers, proxy, Some(CATALOG_TIMEOUT_MS)).await;
+    let mut outcome = send_raw("GET", &url, None, &headers, proxy, Some(CATALOG_TIMEOUT_MS)).await;
+    // IAM 首次迁移：业务码 200901 时确认一次后重试目录请求
+    if !token.is_empty()
+        && outcome
+            .as_ref()
+            .ok()
+            .and_then(|response| response.payload.as_ref())
+            .and_then(super::upstream_errors::business_code)
+            == Some(200_901)
+        && super::iam::confirm(token).await.is_ok()
+    {
+        outcome = send_raw("GET", &url, None, &headers, proxy, Some(CATALOG_TIMEOUT_MS)).await;
+    }
     // 「沿用哪一份」的措辞在三条失败路径上都要用：它决定了用户看到的是
     // 「刷新失败（保留旧目录）」还是「刷新失败（仍在用静态兜底清单）」。
     // 写成闭包而不是提前算好：判据是**失败那一刻**的缓存状态，提前到请求前
@@ -231,6 +243,15 @@ pub async fn refresh(
     };
     let payload = match outcome {
         Ok(response) => {
+            if response.edge_system_error {
+                logging::verbose(
+                    "[Models]",
+                    &format!("小浣熊模型目录被上游边缘节点拒绝（沿用{}）", kept()),
+                );
+                return proto::RefreshOutcome::failed(
+                    "小浣熊上游边缘节点拒绝（x-tt-system-error）".to_string(),
+                );
+            }
             if !response.ok {
                 let reason = format!("上游返回 HTTP {}", response.status);
                 logging::verbose(

@@ -66,6 +66,47 @@ pub fn normalize_phone(raw: &str) -> Result<String, String> {
     }
 }
 
+/// 上游可能以脱敏形态回显手机号（如 `188****9337`），只在与本次号码冲突时才算不匹配
+fn returned_phone_mismatch(returned: &str, expected: &str) -> bool {
+    fn is_mask(ch: char) -> bool {
+        matches!(ch, '*' | '•' | '●' | 'x' | 'X' | '×')
+    }
+    let clean: String = returned
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '-')
+        .collect();
+    let clean = clean.strip_prefix("+86").unwrap_or(&clean);
+    let clean = clean
+        .strip_prefix("86")
+        .filter(|rest| rest.chars().count() == 11 || rest.chars().any(is_mask))
+        .unwrap_or(clean);
+    if clean.is_empty()
+        || !clean.chars().all(|ch| ch.is_ascii_digit() || is_mask(ch))
+        || !clean.chars().any(|ch| ch.is_ascii_digit())
+    {
+        return false;
+    }
+    if clean.bytes().all(|byte| byte.is_ascii_digit()) {
+        return clean.chars().count() == 11 && clean != expected;
+    }
+    // 脱敏形态只有位数足够（至少 7 位）才参与比对，'*' 视为任意单个数字
+    let pattern: Vec<char> = clean
+        .chars()
+        .map(|ch| if is_mask(ch) { '*' } else { ch })
+        .collect();
+    if pattern.len() < 7 {
+        return false;
+    }
+    let expected: Vec<char> = expected.chars().collect();
+    if pattern.len() == expected.len() {
+        return !pattern
+            .iter()
+            .zip(expected.iter())
+            .all(|(pattern, digit)| *pattern == '*' || pattern == digit);
+    }
+    false
+}
+
 /// 6 位数字验证码（客户端把 `mcode` 当字符串传；这里保持字符串形态）
 fn normalize_code(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
@@ -217,6 +258,16 @@ pub async fn login_with_code(
         .unwrap_or("")
         .trim()
         .to_string();
+    // 上游若回显手机号，核对是否属于本次号码（兼容脱敏形态）
+    let returned_phone = data
+        .get("phone")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !returned_phone.is_empty() && returned_phone_mismatch(&returned_phone, &phone) {
+        return Err("短信返回的账号不属于本次手机号，未添加账号".to_string());
+    }
     agent2api_provider_sdk::log_info!(
         "[Loomy] ✅ 登录成功（{}，userid {}）",
         credentials::mask_phone(&phone),
@@ -250,4 +301,29 @@ pub async fn login_with_code(
         },
         desktop: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::returned_phone_mismatch;
+
+    #[test]
+    fn masked_phone_matching_accepts_same_number() {
+        assert!(!returned_phone_mismatch("188****9337", "18812349337"));
+        assert!(!returned_phone_mismatch("18812349337", "18812349337"));
+        assert!(!returned_phone_mismatch("+86 188-1234-9337", "18812349337"));
+    }
+
+    #[test]
+    fn masked_phone_matching_rejects_different_number() {
+        assert!(returned_phone_mismatch("188****0000", "18812349337"));
+        assert!(returned_phone_mismatch("19912349337", "18812349337"));
+    }
+
+    #[test]
+    fn unrecognizable_phone_is_not_judged() {
+        assert!(!returned_phone_mismatch("", "18812349337"));
+        assert!(!returned_phone_mismatch("unknown", "18812349337"));
+        assert!(!returned_phone_mismatch("188****", "18812349337"));
+    }
 }

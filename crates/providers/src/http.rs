@@ -282,6 +282,8 @@ pub struct ApiResponse {
     pub ok: bool,
     /// 解析出的 JSON（空体 / 非 JSON 一律 `None`）。
     pub payload: Option<Value>,
+    /// 上游边缘节点拒绝：403 且带 `x-tt-system-error` 响应头
+    pub edge_system_error: bool,
 }
 
 /// 发一次请求并返回原始结果（网关 `auth_http::send_raw` 的插件侧等价物）。
@@ -333,13 +335,14 @@ pub async fn send_raw(
     let response = builder.with_account_user_agent().send().await?;
     let status = response.status().as_u16();
     let ok = response.status().is_success();
+    let edge_system_error = status == 403 && response.headers().contains_key("x-tt-system-error");
     let text = response.text().await?;
     let payload = if text.trim().is_empty() {
         None
     } else {
         serde_json::from_str::<Value>(&text).ok()
     };
-    Ok(ApiResponse { status, ok, payload })
+    Ok(ApiResponse { status, ok, payload, edge_system_error })
 }
 
 /// 空体 / 非 JSON 一律给 `Value::Null`（与网关 `send_raw` 同口径）。

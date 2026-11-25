@@ -29,13 +29,42 @@ fn result(response: ApiResponse) -> Result<Value, GatewayError> {
         .ok_or_else(|| GatewayError::with_status(502, "小浣熊账号资料响应结构异常"))
 }
 
+/// IAM 首次迁移确认：业务码 200901 时调用一次，供任意控制面请求复用
+pub(super) async fn confirm(token: &str) -> Result<(), GatewayError> {
+    let mut headers = super::headers::desktop_client_headers();
+    headers.push(("Content-Type".to_string(), "application/json".to_string()));
+    headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+    let confirmation = send_raw(
+        "POST",
+        &format!("{}/iam/confirm", super::auth_api_base()),
+        Some(&json!({})),
+        &headers,
+        None,
+        Some(AUTH_REQUEST_TIMEOUT_MS),
+    )
+    .await
+    .map_err(|error| GatewayError::with_status(502, format!("小浣熊 IAM 确认失败: {error}")))?;
+    let payload = confirmation.payload.unwrap_or(Value::Null);
+    if !confirmation.ok || super::upstream_errors::business_code(&payload) != Some(0) {
+        return Err(GatewayError::with_status(
+            if confirmation.status == 401 || super::upstream_errors::token_expired(&payload) {
+                401
+            } else {
+                502
+            },
+            super::upstream_errors::message(&payload),
+        )
+        .with_optional_code(super::upstream_errors::business_code(&payload)));
+    }
+    Ok(())
+}
+
 pub(super) async fn user_info(token: &str) -> Result<Value, GatewayError> {
     super::jwt::validate_iam_token(token)?;
     let mut headers = super::headers::desktop_client_headers();
     headers.push(("Content-Type".to_string(), "application/json".to_string()));
     headers.push(("Authorization".to_string(), format!("Bearer {token}")));
-    let base = super::auth_api_base();
-    let user_url = format!("{base}/user_info");
+    let user_url = format!("{}/user_info", super::auth_api_base());
     let request = || {
         send_raw(
             "GET",
@@ -55,28 +84,7 @@ pub(super) async fn user_info(token: &str) -> Result<Value, GatewayError> {
         .and_then(super::upstream_errors::business_code)
         == Some(200_901);
     let data = if needs_confirmation {
-        let confirmation = send_raw(
-            "POST",
-            &format!("{base}/iam/confirm"),
-            Some(&json!({})),
-            &headers,
-            None,
-            Some(AUTH_REQUEST_TIMEOUT_MS),
-        )
-        .await
-        .map_err(|error| GatewayError::with_status(502, format!("小浣熊 IAM 确认失败: {error}")))?;
-        let payload = confirmation.payload.unwrap_or(Value::Null);
-        if !confirmation.ok || super::upstream_errors::business_code(&payload) != Some(0) {
-            return Err(GatewayError::with_status(
-                if confirmation.status == 401 || super::upstream_errors::token_expired(&payload) {
-                    401
-                } else {
-                    502
-                },
-                super::upstream_errors::message(&payload),
-            )
-            .with_optional_code(super::upstream_errors::business_code(&payload)));
-        }
+        confirm(token).await?;
         result(request().await.map_err(|error| {
             GatewayError::with_status(502, format!("小浣熊账号资料查询失败: {error}"))
         })?)?

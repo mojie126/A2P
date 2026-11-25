@@ -308,11 +308,22 @@ impl Provider for AutoClawProvider {
     /// system 首句指纹 / 请求形态风控）。不给提示的话用户只会看到「上游返回
     /// 406: 上游错误」，无从判断该改什么。
     fn classify(&self, status: u16, body: &Value) -> proto::ErrorClass {
-        let upstream_message = body
-            .get("message")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|text| !text.is_empty());
+        // 上游报错文本可能落在多个键或 `error` 子对象里，逐个取值便于排障
+        let upstream_message = ["message", "msg", "detail", "error_msg", "error_description", "reason"]
+            .iter()
+            .find_map(|key| {
+                body.get(*key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+            })
+            .or_else(|| {
+                body.get("error")
+                    .and_then(|error| error.get("message").or_else(|| error.get("msg")))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+            });
         let raw = upstream_message.unwrap_or("上游错误");
         let mut message = format!("上游返回 {status}: {raw}");
         if status == 406 && upstream_message.is_none() {
