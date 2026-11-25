@@ -719,7 +719,34 @@ impl Provider for WorkBuddyProvider {
             let claim = billing::checkin::claim(&session)
                 .await
                 .map_err(GatewayError::into_control_message)?;
-            Ok(billing::checkin::report_of(&claim))
+            let mut report = billing::checkin::report_of(&claim);
+            // 签到接口本身不回奖励额，积分写在签到状态里（`daily_credit`）：
+            // 成功领取但报告没有金额时，从状态接口补一次，签到卡就能显示「领了多少」
+            if report.credit.is_none() && matches!(report.outcome, proto::CheckinOutcome::Claimed) {
+                if let Ok(Some(status)) = billing::ops::checkin_status(
+                    &session,
+                    self.region,
+                    None,
+                )
+                .await
+                .map(|value| value.as_object().cloned())
+                {
+                    let credit = ["dailyCredit", "rewardCredit", "points"]
+                        .iter()
+                        .find_map(|key| status.get(*key))
+                        .and_then(|value| {
+                            value
+                                .as_i64()
+                                .or_else(|| value.as_f64().map(|number| number as i64))
+                        })
+                        .filter(|value| *value > 0)
+                        .map(|value| format!("+{value} 积分"));
+                    if let Some(credit) = credit {
+                        report.credit = Some(credit);
+                    }
+                }
+            }
+            Ok(report)
         })
     }
 

@@ -567,6 +567,39 @@ pub struct Run {
     pub outcome: Outcome,
     pub before: Vec<Campaign>,
     pub after: Vec<Campaign>,
+    /// 本次**新确认到账**的活动（用于汇总领取数量），不含本来就已完成的活动
+    pub gained: Vec<Campaign>,
+}
+
+impl Run {
+    /// 本次到账的积分合计与单位（`None` = 认不出金额，不冒充 0）
+    pub fn credit(&self) -> Option<String> {
+        let total: f64 = self.gained.iter().map(|item| item.benefit_amount).sum();
+        if !total.is_finite() || total <= 0.0 {
+            return None;
+        }
+        let unit = self
+            .gained
+            .iter()
+            .map(|item| item.benefit_unit.trim())
+            .find(|unit| !unit.is_empty())
+            .unwrap_or("CREDIT");
+        let display = if unit.eq_ignore_ascii_case("CREDIT") || unit.eq_ignore_ascii_case("POINT") {
+            "积分"
+        } else {
+            unit
+        };
+        Some(format!("+{} {display}", format_amount(total)))
+    }
+}
+
+/// 金额展示：整数不带小数点，其余最多两位（与各家 `format_number` 同一口径）
+fn format_amount(value: f64) -> String {
+    if (value.fract()).abs() < 0.005 {
+        format!("{}", value.round() as i64)
+    } else {
+        format!("{value:.2}")
+    }
 }
 
 /// 面板上「领取今日福利」那颗按钮的入口 —— 只走每日登录那一组。
@@ -577,7 +610,18 @@ pub async fn claim_account(
     now_ms: i64,
     manual: bool,
 ) -> Result<Outcome, GatewayError> {
-    Ok(claim_rewards(ctx, account_id, base, now_ms, manual, Rewards::Checkin).await?.outcome)
+    Ok(claim_checkin(ctx, account_id, base, now_ms, manual).await?.outcome)
+}
+
+/// 与 [`claim_account`] 同一执行体，但把本次新到账的活动一起交出来（签到卡片要显示领取数量）
+pub async fn claim_checkin(
+    ctx: &PluginCtx,
+    account_id: &str,
+    base: &str,
+    now_ms: i64,
+    manual: bool,
+) -> Result<Run, GatewayError> {
+    claim_rewards(ctx, account_id, base, now_ms, manual, Rewards::Checkin).await
 }
 
 /// 走一遍完整的领取流程。**这是本模块唯一会发写请求的函数。**
@@ -608,11 +652,11 @@ pub async fn claim_rewards(
     // 走这些分支时台账不动、也没有写请求，所以日志是它们唯一的痕迹。
     if picked.is_empty() {
         logging::log("[CodeArts]", &format!("{}：上游活动列表里没有这一条活动，未发送领取请求", which.label()));
-        return Ok(Run { outcome: Outcome::NotEligible, before: Vec::new(), after: Vec::new() });
+        return Ok(Run { outcome: Outcome::NotEligible, before: Vec::new(), after: Vec::new(), gained: Vec::new() });
     }
     if picked.iter().all(Campaign::is_confirmed) {
         logging::log("[CodeArts]", &format!("{}：上游说这一条已经领过了（CONFIRMED / CONSUMED），未发送写请求", which.label()));
-        return Ok(Run { outcome: Outcome::Already, before: picked.clone(), after: Vec::new() });
+        return Ok(Run { outcome: Outcome::Already, before: picked.clone(), after: Vec::new(), gained: Vec::new() });
     }
     // 限流只管**写**：读资格、判确认永远放行
     if !manual && (ledger.attempts >= MAX_ATTEMPTS_PER_DAY || gap_remaining(&ledger, now_ms).is_some()) {
@@ -620,14 +664,14 @@ pub async fn claim_rewards(
             "[CodeArts]",
             &format!("{}：本地限流（今日已 {} 次写尝试），本轮跳过", which.label(), ledger.attempts),
         );
-        return Ok(Run { outcome: Outcome::Skipped, before: picked.clone(), after: Vec::new() });
+        return Ok(Run { outcome: Outcome::Skipped, before: picked.clone(), after: Vec::new(), gained: Vec::new() });
     }
     if !picked.iter().any(Campaign::has_work) {
         logging::log(
             "[CodeArts]",
             &format!("{}：这一条在列表里但当前不可领（前置未满足），未发送写请求", which.label()),
         );
-        return Ok(Run { outcome: Outcome::NotEligible, before: picked.clone(), after: Vec::new() });
+        return Ok(Run { outcome: Outcome::NotEligible, before: picked.clone(), after: Vec::new(), gained: Vec::new() });
     }
 
     ledger.attempts = ledger.attempts.saturating_add(1).min(MAX_ATTEMPTS_PER_DAY);
@@ -664,6 +708,8 @@ pub async fn claim_rewards(
 
     // 回读二次确认：`code:0` 只是受理
     let verified = delivery(base, &credential).await?;
+    let before_confirmed: Vec<String> = picked.iter().filter(|item| item.is_confirmed()).map(Campaign::key).collect();
+    let mut gained: Vec<Campaign> = Vec::new();
     for item in picked.iter().filter(|item| item.has_work()) {
         let id = item.key();
         let confirmed = verified.iter().any(|seen| {
@@ -675,6 +721,12 @@ pub async fn claim_rewards(
                 "请求已提交，但官方活动列表尚未确认到账；将重试确认，不显示领取成功",
             ));
         }
+        // 本次新到账的才计入领取数量（本来就已完成的那些不算这一次的收益）
+        if !before_confirmed.iter().any(|seen| seen == &id) {
+            if let Some(row) = verified.iter().find(|seen| seen.key() == id && seen.kind == item.kind) {
+                gained.push(row.clone());
+            }
+        }
         let mut progress = ledger.campaigns.get(&id).cloned().unwrap_or_default();
         progress.confirmed = true;
         ledger.campaigns.insert(id, progress);
@@ -685,7 +737,7 @@ pub async fn claim_rewards(
         "[CodeArts]",
         &format!("{}：官方活动列表已回读确认到账（计入套餐赠送积分）", which.label()),
     );
-    Ok(Run { outcome: Outcome::Confirmed, before: picked, after: verified })
+    Ok(Run { outcome: Outcome::Confirmed, before: picked, after: verified, gained })
 }
 
 /// 只读地把**新手福利**取回来（新人注册礼与报名礼，一个写请求都不发）。

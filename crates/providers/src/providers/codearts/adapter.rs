@@ -695,15 +695,19 @@ impl Provider for CodeArtsProvider {
     ) -> SendFuture<'a, agent2api_provider_sdk::CheckinResult> {
         Box::pin(async move {
             let now = logging::now_ms();
-            let outcome = welfare::claim_account(ctx, account, models::DEFAULT_BASE_URL, now, manual)
+            let run = welfare::claim_checkin(ctx, account, models::DEFAULT_BASE_URL, now, manual)
                 .await.map_err(GatewayError::into_control_message)?;
-            let retry_at = match outcome {
+            let retry_at = match run.outcome {
                 welfare::Outcome::NotEligible => Some(now + 10 * 60_000),
                 welfare::Outcome::Skipped => welfare::retry_at(ctx, account, now).await
                     .map_err(GatewayError::into_control_message)?,
                 _ => None,
             };
-            Ok(agent2api_provider_sdk::CheckinResult { report: welfare_report(outcome), retry_at, details: None })
+            Ok(agent2api_provider_sdk::CheckinResult {
+                report: welfare_report(&run),
+                retry_at,
+                details: None,
+            })
         })
     }
 
@@ -935,27 +939,27 @@ fn code_status(code: &str) -> Option<u16> {
 ///   · `Confirmed`（官方已确认到账）→ `Claimed`：今天真领到了；
 ///   · `Already`（已领取并确认）→ `Done`：上游说今天已经领过；
 ///   · `NotEligible` / `Skipped` → `Inactive`：暂无可领取活动（中性未领取）。
-fn welfare_report(outcome: welfare::Outcome) -> proto::CheckinReport {
+fn welfare_report(run: &welfare::Run) -> proto::CheckinReport {
     use proto::CheckinOutcome;
-    let label = outcome.label().to_string();
+    let outcome = run.outcome;
     match outcome {
         welfare::Outcome::Confirmed => proto::CheckinReport {
             outcome: CheckinOutcome::Claimed,
-            credit: None,
+            credit: run.credit(),
             streak: None,
-            message: Some(label),
+            message: Some(outcome.label().to_string()),
         },
         welfare::Outcome::Already => proto::CheckinReport {
             outcome: CheckinOutcome::Done,
             credit: None,
             streak: None,
-            message: Some(label),
+            message: Some(outcome.label().to_string()),
         },
         welfare::Outcome::NotEligible | welfare::Outcome::Skipped => proto::CheckinReport {
             outcome: CheckinOutcome::Inactive,
             credit: None,
             streak: None,
-            message: Some(label),
+            message: Some(outcome.label().to_string()),
         },
     }
 }
