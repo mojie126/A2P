@@ -332,7 +332,8 @@ impl Provider for DemoProvider {
                 return Ok(false);
             };
             let expires_at = found.secret.get("expires_at").and_then(Value::as_i64).unwrap_or(0);
-            Ok(expires_at > 0 && expires_at - now_ms() < 5 * 60 * 1000)
+            Ok(expires_at > 0
+                && expires_at - now_ms() < (5 * 60 * 1000).max(ctx.expiring_lead()))
         })
     }
 

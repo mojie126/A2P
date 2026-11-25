@@ -283,7 +283,8 @@ impl Provider for ClineProvider {
                 return Ok(false);
             }
             match refresh::snapshot(ctx, self.provider_id(), account).await {
-                Ok(credentials) => Ok(credentials.can_refresh() && credentials.is_expiring()),
+                Ok(credentials) => Ok(credentials.can_refresh()
+                    && credentials.is_expiring_within(ctx.expiring_lead())),
                 Err(_) => Ok(false),
             }
         })

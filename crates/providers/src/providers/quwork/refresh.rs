@@ -69,9 +69,15 @@ pub async fn snapshot(ctx: &PluginCtx, account: &str) -> Result<Value, GatewayEr
 }
 
 pub fn expiring(secret: &Value) -> bool {
+    expiring_within(secret, 0)
+}
+
+/// 带最小提前量的临期判定（与自带窗口取较大值）
+pub fn expiring_within(secret: &Value, lead_ms: i64) -> bool {
     !accounts::text(secret, &["accessToken"]).is_empty()
-        && client::timestamp(secret.get("expiresAt"))
-            .is_some_and(|expiry| expiry <= crate::http::now_ms() + endpoints::REFRESH_WINDOW_MS)
+        && client::timestamp(secret.get("expiresAt")).is_some_and(|expiry| {
+            expiry <= crate::http::now_ms() + endpoints::REFRESH_WINDOW_MS.max(lead_ms)
+        })
 }
 
 pub async fn refresh(ctx: &PluginCtx, account: &str, force: bool) -> Result<Value, GatewayError> {

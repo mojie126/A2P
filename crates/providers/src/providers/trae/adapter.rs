@@ -266,7 +266,7 @@ impl Provider for TraeProvider {
                 // 没有 refreshToken 的账号（手工粘贴只给了 accessToken 是常态）
                 // 判 false：续期手段都没有，交给维护只会变成每轮一条稳定失败。
                 Ok(credential) if credential.can_refresh() => credential.needs_refresh(
-                    REFRESH_LEAD_MS,
+                    REFRESH_LEAD_MS.max(ctx.expiring_lead()),
                     MAX_ISSUE_AGE_MS,
                     crate::http::now_ms(),
                 ),

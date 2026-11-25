@@ -597,7 +597,10 @@ impl Provider for CodeArtsProvider {
             Ok(Credential::from_payload(&record)
                 .map(|credential| {
                     credential.can_refresh()
-                        && credential.needs_refresh(refresh::REFRESH_LEAD_MS, logging::now_ms())
+                        && credential.needs_refresh(
+                            refresh::REFRESH_LEAD_MS.max(ctx.expiring_lead()),
+                            logging::now_ms(),
+                        )
                 })
                 .unwrap_or(false))
         })

@@ -278,7 +278,8 @@ impl Provider for CodarProvider {
                 Ok(stored) => stored,
                 Err(_) => return Ok(false),
             };
-            Ok(accounts::Credentials::from_secret(&stored.secret).expiring())
+            Ok(accounts::Credentials::from_secret(&stored.secret)
+                .expiring_within(ctx.expiring_lead()))
         })
     }
 

@@ -238,14 +238,14 @@ pub async fn fetch_token(
     Ok(token)
 }
 
-/// 缓存里的令牌是否临期（5 分钟内过期或没有缓存）。
-pub fn token_expiring(cache_key: &str, credentials: &Credentials) -> bool {
+/// 带最小提前量的临期判定（与自带窗口取较大值）
+pub fn token_expiring_within(cache_key: &str, credentials: &Credentials, lead_ms: i64) -> bool {
     let fingerprint = cookie_fingerprint(&credentials.cookie);
     with_cache(|table| {
         match table.get(cache_key) {
             Some(entry) => {
                 entry.cookie_fingerprint != fingerprint
-                    || http::now_ms() >= entry.expire_at - REFRESH_SKEW_MS
+                    || http::now_ms() >= entry.expire_at - REFRESH_SKEW_MS.max(lead_ms)
             }
             None => true,
         }

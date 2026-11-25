@@ -44,7 +44,7 @@ use agent2api_provider_sdk::PluginCtx;
 use crate::beijing;
 use crate::errors::GatewayError;
 
-use super::balance::userapi_get;
+use super::balance::{userapi_get, userapi_post};
 use super::credentials;
 use super::region::Region;
 
@@ -55,6 +55,9 @@ use super::region::Region;
 /// 留足回溯余量。
 const LEDGERS_PATH: &str = "/agent-assetmgr/api/v1/ledgers_std?asset_type=point&wallet_type=all&cursor=&page_size=50&flow_direction=income";
 
+/// 流水单页条数（与 `LEDGERS_PATH` 的 `page_size` 一致；满页时无法确认今日窗口完整）
+const LEDGER_PAGE_SIZE: usize = 50;
+
 /// 「活跃即发」活动的流水事件名前缀（`metadata.event_type`）。
 ///
 /// 2026-10-15 实测：登录奖励的每一笔（一次性大礼包与日福利）都带
@@ -63,32 +66,33 @@ const LEDGERS_PATH: &str = "/agent-assetmgr/api/v1/ledgers_std?asset_type=point&
 /// `autoclaw_user_signup_day`：登录动作还会带出**新手期**的「注册 Day 1-7 奖励」
 /// （event_type 形如 `autoclaw_user_signup_day_1`，实测 2026-09-22 国际版
 /// +10000「New-user credits (Day 1/7)」）—— 同一个发放钩子，一并确认。
-const ACTIVE_EVENT_TYPE_PREFIXES: [&str; 2] =
-    ["autoclaw_user_active", "autoclaw_user_signup_day"];
+/// `autoclaw_weekly_perks`：2026-11 起的 Weekly Perks 系列（event_type 带期号）。
+const ACTIVE_EVENT_TYPE_PREFIXES: [&str; 3] = [
+    "autoclaw_user_active",
+    "autoclaw_user_signup_day",
+    "autoclaw_weekly_perks",
+];
 
 /// activity_id 前缀兜底（event_type 缺失的老数据 / 变体）。
 ///
 /// `autoclaw_user_active_reward`：日福利（Weekly Perks，如 202609 期）；
 /// `autoclaw_user_active_bonus`：一次性大礼包（如 20261015 那次 20000）；
-/// `autoclaw_new_user_day_1_to_7_bonus`：新手 7 天登录礼。
-const ACTIVE_ACTIVITY_PREFIXES: [&str; 3] = [
+/// `autoclaw_new_user_day_1_to_7_bonus`：新手 7 天登录礼；
+/// `autoclaw_weekly_perks`：新版 Weekly Perks（activity_id 带期号）。
+const ACTIVE_ACTIVITY_PREFIXES: [&str; 4] = [
     "autoclaw_user_active_reward",
     "autoclaw_user_active_bonus",
     "autoclaw_new_user_day_1_to_7_bonus",
+    "autoclaw_weekly_perks",
 ];
 
-/// 今天的活动福利到账状态。
+/// 活动流水的完整读数（登录福利 / Weekly Perks 共用）。
 ///
-/// 返回形状（`promotionReward` 字段的值）：
-///   - 到账：`{"granted": true, "points": 20500, "description": "...",
-///     "grantDate": "YYYY-MM-DD", "entries": [{"points": 20000, ...}, ...]}`
-///     —— `points` 是当日全部活动入账的**合计**，`entries` 是逐笔明细；
-///   - 未到账：`{"granted": false, "grantDate": "YYYY-MM-DD"}`。
-///
-/// 判据是**流水里存在今天的**活动入账：`metadata.grant_date` 等于北京今天的
-/// 日期键（`core::beijing`，与签到链路同一个「今天」口径），且 `event_type`
-/// 命中 [`ACTIVE_EVENT_TYPE_PREFIXES`]（缺失时退回 activity_id 前缀匹配，见模块头）。
-pub async fn today_reward(
+/// 返回 `{granted, points, description, grantDate, entries, incomplete, latest}`：
+/// 今日匹配到入账时给合计与明细，否则给 `latest`（最近一笔活动入账）与
+/// `incomplete`（今日流水窗口被单页上限截断，无法确认是否已到账）。
+/// 判据是北京日期键（`core::beijing`，与签到链路同一个「今天」口径）。
+pub async fn inspect(
     ctx: &PluginCtx,
     region: Region,
     account_id: &str,
@@ -107,67 +111,142 @@ pub async fn today_reward(
     if credentials.token.trim().is_empty() {
         return Err(GatewayError::with_status(401, "该账号没有可用凭证，无法查询活动福利"));
     }
+    inspect_credentials(&credentials).await
+}
 
-    let payload = userapi_get(&credentials, LEDGERS_PATH, "活动福利查询").await?;
+/// 与 [`inspect`] 同一读数，凭证由调用方提供（活动领取要求复核用同一份凭证）
+pub async fn inspect_credentials(
+    credentials: &credentials::AutoClawCredentials,
+) -> Result<Value, GatewayError> {
+    let payload = userapi_get(credentials, LEDGERS_PATH, "活动福利查询").await?;
     let today = beijing::today_key();
-
-    let entries: Vec<&Value> = payload
+    let entries: &[Value] = payload
         .get("data")
         .and_then(|data| data.get("entries"))
         .and_then(Value::as_array)
-        .map(|entries| entries.iter().filter(|entry| is_today_reward(entry, &today)).collect())
+        .map(Vec::as_slice)
         .unwrap_or_default();
-
-    let Some(first) = entries.first() else {
-        return Ok(json!({ "granted": false, "grantDate": today }));
-    };
-
-    let total: i64 = entries
+    let matched: Vec<&Value> = entries.iter().filter(|entry| is_reward(entry)).collect();
+    let latest = matched.first().map(|entry| entry_detail(entry)).unwrap_or(Value::Null);
+    let found: Vec<&Value> = matched
+        .into_iter()
+        .filter(|entry| grant_date(entry) == today)
+        .collect();
+    let incomplete = found.is_empty()
+        && entries.len() >= LEDGER_PAGE_SIZE
+        && entries
+            .last()
+            .map(|entry| grant_date(entry))
+            .is_none_or(|date| date >= today.as_str());
+    if found.is_empty() {
+        return Ok(json!({
+            "granted": false,
+            "grantDate": today,
+            "incomplete": incomplete,
+            "latest": latest,
+        }));
+    }
+    let mut total: i64 = 0;
+    let mut known = !incomplete && entries.len() < LEDGER_PAGE_SIZE;
+    let detail: Vec<Value> = found
         .iter()
-        .filter_map(|entry| entry.get("amount").and_then(Value::as_i64))
-        .sum();
-    let detail: Vec<Value> = entries.iter().map(|entry| entry_detail(entry)).collect();
-
+        .map(|entry| {
+            let points = entry.get("amount").and_then(Value::as_i64);
+            match points.and_then(|points| total.checked_add(points)) {
+                Some(sum) => total = sum,
+                None => known = false,
+            }
+            entry_detail(entry)
+        })
+        .collect();
     Ok(json!({
         "granted": true,
-        "points": total,
-        "description": first.get("description").and_then(Value::as_str).unwrap_or(""),
+        "points": if known { json!(total) } else { Value::Null },
+        "description": found
+            .first()
+            .and_then(|entry| entry.get("description"))
+            .and_then(Value::as_str)
+            .unwrap_or(""),
         "grantDate": today,
         "entries": detail,
+        "incomplete": false,
+        "latest": latest,
     }))
 }
 
-/// 一笔活动入账的明细（`entries` 数组的元素）。
+/// 今天的活动福利到账状态（签到链路用；未到账不因窗口不完整而报错）。
+pub async fn today_reward(
+    ctx: &PluginCtx,
+    region: Region,
+    account_id: &str,
+) -> Result<Value, GatewayError> {
+    let report = inspect(ctx, region, account_id).await?;
+    if report.get("granted").and_then(Value::as_bool) == Some(true) {
+        return Ok(report);
+    }
+    Ok(json!({
+        "granted": false,
+        "grantDate": report.get("grantDate").cloned().unwrap_or(json!(beijing::today_key())),
+    }))
+}
+
+/// 触发一次「登录活跃」（客户端启动同款 user-info），供活动领取复核使用
+/// 触发一次「登录活跃」（客户端启动同款 user-info），供活动领取复核使用
+pub async fn activate_credentials(
+    credentials: &credentials::AutoClawCredentials,
+) -> Result<(), GatewayError> {
+    let body = json!({ "source_id": "autoclaw", "device_id": credentials.device_id });
+    userapi_post(credentials, super::checkin::USER_INFO_PATH, &body, "触发登录活跃").await?;
+    Ok(())
+}
+
+/// 一笔活动入账的明细（`entries` / `latest` 的元素）。
 fn entry_detail(entry: &Value) -> Value {
     let metadata = entry.get("metadata");
     json!({
-        "points": entry.get("amount").and_then(Value::as_i64).unwrap_or(0),
+        "points": entry.get("amount").and_then(Value::as_i64),
+        "grantDate": grant_date(entry),
         "description": entry.get("description").and_then(Value::as_str).unwrap_or(""),
         "activityId": metadata
             .and_then(|metadata| metadata.get("activity_id"))
             .and_then(Value::as_str)
             .unwrap_or(""),
+        "eventType": metadata
+            .and_then(|metadata| metadata.get("event_type"))
+            .and_then(Value::as_str)
+            .unwrap_or(""),
     })
 }
 
-/// 这条流水是不是「今天的活动福利」。
+/// 一笔流水的入账日期（`metadata.grant_date`，缺失给空串）
+fn grant_date(entry: &Value) -> &str {
+    entry
+        .get("metadata")
+        .and_then(|metadata| metadata.get("grant_date"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+}
+
+/// 这条流水是不是活动福利入账。
 ///
-/// 判据见模块头：`grant_date` 必须是今天，且 `event_type` 命中前缀
-/// （activity_id 前缀兜底）。
-fn is_today_reward(entry: &Value, today: &str) -> bool {
-    let Some(metadata) = entry.get("metadata") else {
-        return false;
+/// 判据见模块头：`event_type` 命中活动前缀（含 Weekly Perks），
+/// 缺失时退回 `activity_id` 前缀兜底。
+fn is_reward(entry: &Value) -> bool {
+    let metadata = match entry.get("metadata") {
+        Some(metadata) => metadata,
+        None => return false,
     };
-    let grant_date = metadata.get("grant_date").and_then(Value::as_str).unwrap_or("");
-    if grant_date != today {
-        return false;
-    }
     let event_type = metadata.get("event_type").and_then(Value::as_str).unwrap_or("");
-    if ACTIVE_EVENT_TYPE_PREFIXES.iter().any(|prefix| event_type.starts_with(prefix)) {
+    if ACTIVE_EVENT_TYPE_PREFIXES
+        .iter()
+        .any(|prefix| event_type.starts_with(prefix))
+        || event_type.contains("weekly_perks")
+    {
         return true;
     }
     let activity_id = metadata.get("activity_id").and_then(Value::as_str).unwrap_or("");
     ACTIVE_ACTIVITY_PREFIXES
         .iter()
         .any(|prefix| activity_id.starts_with(prefix))
+        || activity_id.contains("weekly_perks")
 }

@@ -79,8 +79,13 @@ impl AtomcodeCredentials {
     /// 因为续期本身会轮换 refresh token —— 提前刷是安全的，而拿死令牌
     /// 发一次请求不是。
     pub fn expiring(&self) -> bool {
+        self.expiring_within(0)
+    }
+
+    /// 带最小提前量的临期判定（与自带窗口取较大值）
+    pub fn expiring_within(&self, lead_ms: i64) -> bool {
         self.expires_at > 0
-            && self.expires_at - REFRESH_WINDOW_SECONDS * 1000 <= logging::now_ms()
+            && self.expires_at - (REFRESH_WINDOW_SECONDS * 1000).max(lead_ms) <= logging::now_ms()
     }
 
     /// 已经彻底过期（用于区分「临期」与「必需重登」的提示口径）

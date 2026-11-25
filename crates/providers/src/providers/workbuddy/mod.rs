@@ -621,7 +621,7 @@ impl Provider for WorkBuddyProvider {
                 .and_then(|auth| auth.get("expiresAt"))
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0);
-            Ok(auth::is_token_expiring(expires_at))
+            Ok(auth::is_token_expiring_within(expires_at, ctx.expiring_lead()))
         })
     }
 

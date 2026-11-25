@@ -457,7 +457,9 @@ impl Provider for AntigravityProvider {
                 _ => return Ok(false),
             };
             Ok(match credentials::from_record(Some(&record)) {
-                Ok(credentials) if credentials.can_refresh() => credentials.expiring(),
+                Ok(credentials) if credentials.can_refresh() => {
+                    credentials.expiring_within(ctx.expiring_lead())
+                }
                 _ => false,
             })
         })

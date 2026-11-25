@@ -30,6 +30,9 @@
 //! ── 硬约束 ──────────────────────────────────────────────────
 //! release 是 `panic=abort`：零 unwrap/expect/panic，取值一律走 Option 链。
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use serde_json::{json, Map, Value};
 
 use agent2api_provider_sdk::PluginCtx;
@@ -37,12 +40,60 @@ use agent2api_provider_sdk::PluginCtx;
 use crate::beijing;
 use crate::errors::GatewayError;
 use crate::http::send_raw;
+use crate::logging;
 
 use super::credentials;
 
 /// 余额 / 订阅接口的请求超时（源实现 `REQUEST_TIMEOUT_MS`）。
 /// 新手任务的首次登录奖励探测（`onboarding.rs`）沿用同一超时。
 pub(super) const REQUEST_TIMEOUT_MS: u64 = 20_000;
+
+/// 余额接口受限后的冷却窗口（上游 `points-balance:cooldown` 的 180 秒）
+const BALANCE_FALLBACK_COOLDOWN_MS: i64 = 180_000;
+
+/// 账号 → 冷却解禁时刻；进程内状态，重启即清空
+static BALANCE_COOLDOWN: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+
+fn cooldown_guard() -> std::sync::MutexGuard<'static, HashMap<String, i64>> {
+    match BALANCE_COOLDOWN
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn cooling_down(account: &str, now: i64) -> bool {
+    cooldown_guard()
+        .get(account)
+        .is_some_and(|until| *until > now)
+}
+
+fn hold_cooldown(account: &str, now: i64) {
+    cooldown_guard().insert(
+        account.to_string(),
+        now.saturating_add(BALANCE_FALLBACK_COOLDOWN_MS),
+    );
+}
+
+fn clear_cooldown(account: &str) {
+    cooldown_guard().remove(account);
+}
+
+/// 可用积分：`total_chargeable_points` 优先，缺失退 `available_points`
+fn available_of(value: &Value) -> Option<i64> {
+    to_int(value.get("total_chargeable_points")).or_else(|| to_int(value.get("available_points")))
+}
+
+/// 设置接口路径：有组织码走组织域，与每日签到的 `setting_info` 同一约定
+fn settings_path(org: &str) -> &'static str {
+    if org.is_empty() {
+        "/api/web/office/v3/setting_info"
+    } else {
+        "/api/web/org/user/office/v1/setting_info"
+    }
+}
 
 /// 默认主站 origin（源实现 `apiOrigin()` 的兜底值）
 const DEFAULT_MAIN_SITE_URL: &str = "https://xiaohuanxiong.com";
@@ -88,22 +139,84 @@ pub(super) async fn query_usage(ctx: &PluginCtx, account_id: &str) -> Result<Val
     let mut org_headers = Vec::new();
     super::headers::append_org(&mut org_headers, &credentials.org_code)
         .map_err(|message| GatewayError::with_status(400, message))?;
-    let points = request_json(
-        &origin,
-        "/api/web/points/v1/balance",
-        &credentials.token,
-        &org_headers,
-    )
-    .await?;
-    if !points.is_object() {
-        return Err(GatewayError::with_status(
-            502,
-            "积分余额响应结构异常（期望一个 JSON 对象）",
-        ));
+    // 余额接口受限（非 401/409/503）时回退设置接口的可用积分：与上游
+    // `d0712c7` 的 `points-balance:cooldown` 同一口径，冷却期内直接走回退
+    let now = logging::now_ms();
+    let in_cooldown = cooling_down(account_id, now);
+    let mut points_error: Option<String> = None;
+    let mut points = Value::Null;
+    let mut from_setting = false;
+    if !in_cooldown {
+        match request_json(
+            &origin,
+            "/api/web/points/v1/balance",
+            &credentials.token,
+            &org_headers,
+        )
+        .await
+        {
+            Ok(value) if value.is_object() && available_of(&value).is_some() => points = value,
+            Ok(value) => {
+                // 结构异常同样走回退：设置接口可能仍有可读积分
+                points_error = Some(if value.is_object() {
+                    "积分余额响应缺少可用积分".to_string()
+                } else {
+                    "积分余额响应结构异常（期望一个 JSON 对象）".to_string()
+                });
+            }
+            Err(error) => {
+                // 登录态、限频与维护态不回退：换接口同样不可用
+                if matches!(error.status_code, 401 | 409 | 503) {
+                    return Err(error);
+                }
+                if error.code.as_deref() == Some("raccoon_edge_403") {
+                    hold_cooldown(account_id, now);
+                }
+                points_error = Some(error.message);
+            }
+        }
+    }
+    if points.is_null() {
+        let mut settings_headers = super::headers::desktop_client_headers();
+        settings_headers.extend(org_headers.iter().cloned());
+        settings_headers.push(("X-Raccoon-Language".to_string(), "zh".to_string()));
+        match request_json_ex(
+            &origin,
+            "GET",
+            settings_path(&credentials.org_code),
+            &credentials.token,
+            &settings_headers,
+            REQUEST_TIMEOUT_MS,
+        )
+        .await
+        {
+            Ok(value) if value.is_object() && available_of(&value).is_some() => {
+                points = value;
+                from_setting = true;
+            }
+            Ok(_) => {
+                return Err(GatewayError::with_status(
+                    502,
+                    points_error.unwrap_or_else(|| "设置接口未返回可用积分".to_string()),
+                ));
+            }
+            Err(error) => {
+                if error.status_code == 401 {
+                    return Err(error);
+                }
+                // 冷却期内设置接口也失败 = 上游确实不可用，清掉冷却让下一轮重试
+                if in_cooldown {
+                    clear_cooldown(account_id);
+                }
+                return Err(GatewayError::with_status(
+                    error.status_code,
+                    points_error.unwrap_or(error.message),
+                ));
+            }
+        }
     }
 
-    let available = to_int(points.get("total_chargeable_points"))
-        .or_else(|| to_int(points.get("available_points")));
+    let available = available_of(&points);
     let wallets: Vec<Value> = WALLET_LABELS
         .iter()
         .filter_map(|(key, display_name)| {
@@ -149,7 +262,15 @@ pub(super) async fn query_usage(ctx: &PluginCtx, account_id: &str) -> Result<Val
     };
 
     let mut raw = Map::new();
-    raw.insert("points".to_string(), points);
+    if from_setting {
+        raw.insert("pointsSource".to_string(), json!("setting_info"));
+        raw.insert("settingInfo".to_string(), points);
+    } else {
+        raw.insert("points".to_string(), points);
+    }
+    if let Some(message) = points_error {
+        raw.insert("pointsError".to_string(), json!(message));
+    }
     if !subscription_error.is_null() {
         raw.insert("subscriptionError".to_string(), subscription_error);
     }
@@ -248,8 +369,10 @@ pub(super) async fn request_json_ex(
         return Err(GatewayError::with_status(401, "登录态已过期，无法查询积分"));
     }
     if !response.ok {
+        // 保留上游状态码：余额回退按 401/409/503 与其它受限区分处理，
+        // 统一压成 502 会让那三条分支失效
         return Err(GatewayError::with_status(
-            502,
+            i32::from(response.status),
             format!("积分查询返回 HTTP {}", response.status),
         ));
     }

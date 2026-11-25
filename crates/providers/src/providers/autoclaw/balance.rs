@@ -50,7 +50,7 @@ use super::region::Region;
 use super::refresh::signed_auth_headers;
 
 /// 积分 / 订阅接口的请求超时（源实现 `REQUEST_TIMEOUT_MS`）
-const REQUEST_TIMEOUT_MS: u64 = 20_000;
+pub(super) const REQUEST_TIMEOUT_MS: u64 = 20_000;
 
 /// 积分钱包路径（源实现 `POINTS_WALLET_PATH`，v2 主链路）
 const POINTS_WALLET_PATH: &str = "/agent-assetmgr/api/v2/wallets?biz_app_id=autoclaw";

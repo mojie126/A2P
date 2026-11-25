@@ -179,11 +179,19 @@ impl Credentials {
     /// 企业账号恒为否：它们不进个人设备流续期链路（对齐官方 `due()` 的口径），
     /// 避免维护任务对企业账号反复触发续期报错。
     pub fn expiring(&self) -> bool {
+        self.expiring_within(0)
+    }
+
+    /// 带最小提前量的临期判定（企业账号仍恒为否）
+    pub fn expiring_within(&self, lead_ms: i64) -> bool {
         if self.is_biz == Some(true) {
             return false;
         }
         let margin = if self.site.is_qwenwork() { QWENWORK_REFRESH_MARGIN_MS } else { REFRESH_MARGIN_MS };
-        self.can_refresh() && self.expires_at.is_some_and(|expiry| expiry <= logging::now_ms() + margin)
+        self.can_refresh()
+            && self
+                .expires_at
+                .is_some_and(|expiry| expiry <= logging::now_ms() + margin.max(lead_ms))
     }
 
     pub fn to_value(&self) -> Value {

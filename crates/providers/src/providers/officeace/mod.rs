@@ -276,7 +276,7 @@ impl Provider for OfficeAceProvider {
             let Ok(record) = crate::store::record(ctx, ID, account).await else {
                 return Ok(false);
             };
-            Ok(control::credentials_expiring(&record))
+            Ok(control::credentials_expiring_within(&record, ctx.expiring_lead()))
         })
     }
 

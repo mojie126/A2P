@@ -159,11 +159,8 @@ fn login_methods(site: Site) -> Vec<proto::LoginMethod> {
     methods
 }
 
-/// 签到中心的说明（没有签到的站点给空信息，界面就不挂这一组）。
+/// 签到中心的说明（只有参与签到的站点才会调用，见 `meta`）。
 fn checkin_info(site: Site) -> proto::CheckinInfo {
-    if !site.supports_checkin() {
-        return proto::CheckinInfo::default();
-    }
     proto::CheckinInfo {
         // 两个站点链路不同：中国版是活动领取（每天 10:00 刷新），国际版
         // 要带设备风控身份领「每日 100 Credits」（UMID 组件）。
@@ -233,7 +230,7 @@ async fn record_limited(
 
 impl Provider for QoderProvider {
     fn meta(&self) -> ProviderMeta {
-        ProviderMeta::new(self.site.provider_id(), self.site.display_name())
+        let mut meta = ProviderMeta::new(self.site.provider_id(), self.site.display_name())
         .with_capabilities(proto::Capabilities {
             chat: true,
             // 请求体要先编码再签名、响应要拆信封 —— 见模块头
@@ -276,8 +273,14 @@ impl Provider for QoderProvider {
             expiry: vec!["expiresAt".to_string()],
             email_as_name: true,
             ..Default::default()
-        })
-        .with_checkin(checkin_info(self.site))
+        });
+        // 不参与签到的站点（千问办公）不申报签到信息：`CheckinInfo` 的 `daily`
+        // 缺省为 true，申报了就会被网关当成每日签到家拉进集合，执行时又因
+        // 能力位关闭落到兜底，报出「签到链路尚未接入」
+        if self.site.supports_checkin() {
+            meta = meta.with_checkin(checkin_info(self.site));
+        }
+        meta
     }
 
     fn models<'a>(
@@ -379,7 +382,7 @@ impl Provider for QoderProvider {
                 _ => return Ok(false),
             };
             Ok(credentials::Credentials::from_payload(&record)
-                .map(|credentials| credentials.expiring())
+                .map(|credentials| credentials.expiring_within(ctx.expiring_lead()))
                 .unwrap_or(false))
         })
     }

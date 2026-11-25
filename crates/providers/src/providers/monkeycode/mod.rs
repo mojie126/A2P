@@ -276,7 +276,7 @@ impl Provider for MonkeyCodeProvider {
                 Err(_) => return Ok(false),
             };
             Ok(credentials::from_record(record.as_ref())
-                .map(|credentials| credentials.expiring())
+                .map(|credentials| credentials.expiring_within(ctx.expiring_lead()))
                 .unwrap_or(false))
         })
     }

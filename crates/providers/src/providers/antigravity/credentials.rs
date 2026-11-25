@@ -89,13 +89,18 @@ impl AntigravityCredentials {
     /// access_token（从未刷过 / 手工粘贴只给了 refreshToken）→ true：那种账号
     /// 必须先刷一次才能用。
     pub fn expiring(&self) -> bool {
+        self.expiring_within(0)
+    }
+
+    /// 带最小提前量的临期判定（与自带窗口取较大值）
+    pub fn expiring_within(&self, lead_ms: i64) -> bool {
         if !self.has_access_token() {
             return true;
         }
         if self.expires_at <= 0 {
             return false;
         }
-        self.expires_at - REFRESH_SKEW_MS <= crate::logging::now_ms()
+        self.expires_at - REFRESH_SKEW_MS.max(lead_ms) <= crate::logging::now_ms()
     }
 
     /// 显示用的脱敏 refresh token 尾号（只给尾 4 位；**绝不打印完整串**）

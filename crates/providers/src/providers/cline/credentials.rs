@@ -154,13 +154,22 @@ impl ClineCredentials {
         self.is_expiring_at(crate::logging::now_ms())
     }
 
+    /// 带最小提前量的临期判定（与自带窗口取较大值）
+    pub fn is_expiring_within(&self, lead_ms: i64) -> bool {
+        self.is_expiring_at_within(crate::logging::now_ms(), lead_ms)
+    }
+
     /// 指定时刻的临期判定（把「现在」作参数是为了让判据可测、也是为了让
     /// 同一批判定在同一时刻下比较）
     pub fn is_expiring_at(&self, now_ms: i64) -> bool {
+        self.is_expiring_at_within(now_ms, 0)
+    }
+
+    fn is_expiring_at_within(&self, now_ms: i64, lead_ms: i64) -> bool {
         match self.expires_at {
             Some(expires) => {
                 let expires = expires as i64;
-                expires.saturating_sub(now_ms) <= PROACTIVE_REFRESH_MARGIN_MS
+                expires.saturating_sub(now_ms) <= PROACTIVE_REFRESH_MARGIN_MS.max(lead_ms)
             }
             None => false,
         }

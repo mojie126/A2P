@@ -117,7 +117,7 @@ impl Provider for QuWorkProvider {
         Box::pin(async move {
             Ok(refresh::snapshot(ctx, account)
                 .await
-                .is_ok_and(|secret| refresh::expiring(&secret)))
+                .is_ok_and(|secret| refresh::expiring_within(&secret, ctx.expiring_lead())))
         })
     }
 

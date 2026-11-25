@@ -162,13 +162,14 @@ impl Provider for KiroProvider {
             if credentials.is_api_key() {
                 return Ok(false);
             }
+            let lead = ctx.expiring_lead();
             if credentials.is_local() {
                 let Some(live) = refresh::read_local(&credentials.source).await else {
                     return Ok(false);
                 };
-                return Ok(!live.fresh(endpoints::LEAD_MS));
+                return Ok(!live.fresh(endpoints::LEAD_MS.max(lead)));
             }
-            Ok(!credentials.fresh(endpoints::LEAD_MS))
+            Ok(!credentials.fresh(endpoints::LEAD_MS.max(lead)))
         })
     }
 

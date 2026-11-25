@@ -213,8 +213,16 @@ impl AutoClawCredentials {
     /// 「判不出过期时间也要定期刷」的兜底走 [`hourly_forced_refresh_due`]，
     /// 只挂在维护任务那条低频路径上 —— 见那里的说明。
     pub fn is_expiring(&self) -> bool {
+        self.is_expiring_within(0)
+    }
+
+    /// 带最小提前量的临期判定（与自带窗口取较大值）
+    pub fn is_expiring_within(&self, lead_ms: i64) -> bool {
         match self.expires_at {
-            Some(expires_at) => expires_at - PROACTIVE_REFRESH_MARGIN_MS <= logging::now_ms() as f64,
+            Some(expires_at) => {
+                expires_at - PROACTIVE_REFRESH_MARGIN_MS.max(lead_ms as f64)
+                    <= logging::now_ms() as f64
+            }
             None => false,
         }
     }

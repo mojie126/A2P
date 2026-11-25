@@ -53,9 +53,16 @@ impl Credentials {
 
     /// 是否需要提前续期（窗口 48 小时）。
     pub fn expiring(&self) -> bool {
+        self.expiring_within(0)
+    }
+
+    /// 带最小提前量的临期判定（与自带窗口取较大值）
+    pub fn expiring_within(&self, lead_ms: i64) -> bool {
         credentials::expires(&self.access_token)
             .or(self.expires_at)
-            .is_some_and(|expires| expires - crate::http::now_ms() <= super::endpoints::REFRESH_BEFORE_MS)
+            .is_some_and(|expires| {
+                expires - crate::http::now_ms() <= super::endpoints::REFRESH_BEFORE_MS.max(lead_ms)
+            })
     }
 }
 

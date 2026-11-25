@@ -564,7 +564,14 @@ impl Serve {
                 provider.refresh_token(&ctx, &account).await.map(Value::String)
             }
             proto::methods::gateway::TOKEN_EXPIRING => {
-                provider.token_expiring(&ctx, &account).await.map(Value::Bool)
+                // 维护链路按「间隔 + 缓冲」传最小提前量；只在这一条控制调用上生效
+                let lead = params
+                    .get("minLeadMs")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    .max(0);
+                let scoped = PluginCtx { expiring_lead_ms: lead, ..ctx.clone() };
+                provider.token_expiring(&scoped, &account).await.map(Value::Bool)
             }
             proto::methods::gateway::MODELS_LIST => provider.models(&ctx, &account).await.and_then(
                 |list| serde_json::to_value(list).map_err(|e| format!("清单无法序列化: {e}")),
@@ -757,7 +764,7 @@ impl Serve {
                 loopback_port: 0,
             }
         });
-        PluginCtx { env, call: Arc::new(CallHandle { host: Some(self.clone()), provider: provider.to_string() }) }
+        PluginCtx { env, expiring_lead_ms: 0, call: Arc::new(CallHandle { host: Some(self.clone()), provider: provider.to_string() }) }
     }
 
     /// 收下一条回调应答。

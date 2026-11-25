@@ -204,7 +204,7 @@ impl Provider for OrcaTermProvider {
             let Ok(credentials) = credentials::snapshot(ctx, account).await else {
                 return Ok(false);
             };
-            Ok(credentials.is_expiring())
+            Ok(credentials.is_expiring_within(ctx.expiring_lead()))
         })
     }
 

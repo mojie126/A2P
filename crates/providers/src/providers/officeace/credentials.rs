@@ -86,8 +86,13 @@ impl OfficeAceCredential {
 
     /// 控制面临期判定：到期前 [`EXPIRY_MARGIN_MS`] 算临期。
     pub fn control_plane_expiring(&self) -> bool {
+        self.control_plane_expiring_within(0)
+    }
+
+    /// 带最小提前量的控制面临期判定（与自带窗口取较大值）
+    pub fn control_plane_expiring_within(&self, lead_ms: i64) -> bool {
         self.expires_at > 0
-            && self.expires_at - EXPIRY_MARGIN_MS <= crate::logging::now_ms()
+            && self.expires_at - EXPIRY_MARGIN_MS.max(lead_ms) <= crate::logging::now_ms()
     }
 
     /// 转成签名层要的凭据（控制面请求用；没有临时 AK/SK 时返回 Err）。

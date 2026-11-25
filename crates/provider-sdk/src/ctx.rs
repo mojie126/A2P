@@ -77,6 +77,11 @@ pub enum StoreProxy {
 pub struct PluginCtx {
     /// 网关给的运行环境（`init` 时拿到）。
     pub env: proto::HostEnv,
+    /// 本次调用要求的最小临期提前量（毫秒）；只在 `token.expiring` 时非零。
+    ///
+    /// 网关按「维护间隔 + 缓冲」传入 `minLeadMs`，各家判定临期时与自带窗口
+    /// 取较大值，避免按自带 2~5 分钟窗口判定时「上一轮还差几分钟、下一轮已过期」。
+    pub expiring_lead_ms: i64,
     /// 回调发送端（`serve()` 注入）。
     pub(crate) call: std::sync::Arc<dyn CallGateway>,
 }
@@ -92,6 +97,11 @@ impl std::fmt::Debug for PluginCtx {
 }
 
 impl PluginCtx {
+    /// 本次临期判定要求的最小提前量（毫秒，0 = 只看提供商自带窗口）
+    pub fn expiring_lead(&self) -> i64 {
+        self.expiring_lead_ms.max(0)
+    }
+
     /// 读一条账号。`account` 为空串 = 该 provider 的队首账号。
     pub async fn store_get(
         &self,

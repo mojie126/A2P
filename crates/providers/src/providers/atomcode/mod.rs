@@ -307,7 +307,10 @@ impl Provider for AtomcodeProvider {
                 return Ok(false);
             };
             Ok(credentials::from_record(Some(&record))
-                .map(|credentials| !credentials.refresh_token.is_empty() && credentials.expiring())
+                .map(|credentials| {
+                    !credentials.refresh_token.is_empty()
+                        && credentials.expiring_within(ctx.expiring_lead())
+                })
                 .unwrap_or(false))
         })
     }

@@ -436,7 +436,7 @@ impl Provider for AccioProvider {
                 _ => return Ok(false),
             };
             Ok(Credentials::from_payload(&record)
-                .map(|credentials| credentials.expiring())
+                .map(|credentials| credentials.expiring_within(ctx.expiring_lead()))
                 .unwrap_or(false))
         })
     }

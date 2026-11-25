@@ -75,10 +75,15 @@ pub fn build_auth_headers(session: &Value) -> Vec<(String, String)> {
 /// 转发链路的懒刷新与后台维护共用这一个判据 —— 两处各写一个窗口，会出现
 /// 「维护认为不需要刷、请求链路却认为临期」的分叉，排障时极难发现。
 pub fn is_token_expiring(expires_at: f64) -> bool {
+    is_token_expiring_within(expires_at, 0)
+}
+
+/// 带最小提前量的临期判定（与自带窗口取较大值）
+pub fn is_token_expiring_within(expires_at: f64, lead_ms: i64) -> bool {
     if expires_at <= 0.0 {
         return false;
     }
-    expires_at - REFRESH_WINDOW_MS <= logging::now_ms() as f64
+    expires_at - REFRESH_WINDOW_MS.max(lead_ms as f64) <= logging::now_ms() as f64
 }
 
 /// 把刷新响应补上 `expiresAt`（`expiresIn` 秒 → 毫秒时间戳）。

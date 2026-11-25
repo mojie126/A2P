@@ -128,10 +128,15 @@ impl Credentials {
 
     /// 有刷新凭证 + 有到期时间，且快到点了
     pub fn expiring(&self) -> bool {
+        self.expiring_within(0)
+    }
+
+    /// 带最小提前量的临期判定（与自带窗口取较大值，见 `PluginCtx::expiring_lead`）
+    pub fn expiring_within(&self, lead_ms: i64) -> bool {
         self.can_refresh()
             && self
                 .expires_at
-                .is_some_and(|expiry| expiry <= logging::now_ms() + REFRESH_MARGIN_MS)
+                .is_some_and(|expiry| expiry <= logging::now_ms() + REFRESH_MARGIN_MS.max(lead_ms))
     }
 
     pub fn can_refresh(&self) -> bool {

@@ -59,8 +59,13 @@ pub struct MonkeyCodeCredentials {
 impl MonkeyCodeCredentials {
     /// 是否已过期或进入临期窗口（上游无续期手段，这个判定只用于提示重登）
     pub fn expiring(&self) -> bool {
+        self.expiring_within(0)
+    }
+
+    /// 带最小提前量的临期判定（与自带窗口取较大值）
+    pub fn expiring_within(&self, lead_ms: i64) -> bool {
         self.expires_at > 0
-            && self.expires_at - EXPIRY_MARGIN_MS <= crate::logging::now_ms()
+            && self.expires_at - EXPIRY_MARGIN_MS.max(lead_ms) <= crate::logging::now_ms()
     }
 
     /// 创建任务是否具备必要条件（session + image_id）。转发入口（`chat.rs`）

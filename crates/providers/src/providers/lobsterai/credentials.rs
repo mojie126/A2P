@@ -71,8 +71,13 @@ impl LobsterCredentials {
 
     /// 是否已过期或进入提前续期窗口（到期前 1 小时）。
     pub fn expiring(&self) -> bool {
+        self.expiring_within(0)
+    }
+
+    /// 带最小提前量的临期判定（与自带窗口取较大值）
+    pub fn expiring_within(&self, lead_ms: i64) -> bool {
         const WINDOW_MS: i64 = 3600 * 1000;
-        self.expires_at > 0 && self.expires_at - WINDOW_MS <= logging::now_ms()
+        self.expires_at > 0 && self.expires_at - WINDOW_MS.max(lead_ms) <= logging::now_ms()
     }
 
     /// keyfrom 载荷（`firstKeyfrom` / `latestKeyfrom` / `version` 恒在，

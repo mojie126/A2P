@@ -97,12 +97,13 @@ pub async fn query_usage(ctx: &PluginCtx, account_id: &str) -> Result<Value, Gat
         proxy.as_ref(),
     ).await?;
 
-    let (wallets, windows, available_view) = wallets_of(&summary_payload);
-
     // ── 订阅档（best-effort，见模块头：失败就不写这个键）────────────
+    // 先取档位再算窗口：付费档决定「周窗耗尽、上游省掉 5 小时桶时」要不要补回
+    // 0% 的短窗（见 `wallets_of`）
     let mut raw = Map::new();
-    raw.insert("quotaSummary".to_string(), summary_payload);
+    raw.insert("quotaSummary".to_string(), summary_payload.clone());
     let mut subscription = Map::new();
+    let mut plan_name: Option<String> = None;
     match project::fetch_tier(&credentials.access_token, proxy.as_ref()).await {
         Ok(tier) => {
             // 上游原文照抄进 raw（排障用），归一化只写进 subscription
@@ -115,7 +116,7 @@ pub async fn query_usage(ctx: &PluginCtx, account_id: &str) -> Result<Value, Gat
             } else {
                 normalize_tier(&tier)
             };
-            subscription.insert("planName".to_string(), Value::String(plan));
+            plan_name = Some(plan);
         }
         Err(error) => {
             logging::verbose(
@@ -123,6 +124,13 @@ pub async fn query_usage(ctx: &PluginCtx, account_id: &str) -> Result<Value, Gat
                 &format!("订阅档未读到（余额部分照常返回）：{}", error.message),
             );
         }
+    }
+    let paid_tier = plan_name
+        .as_deref()
+        .is_some_and(|plan| !plan.eq_ignore_ascii_case("free"));
+    let (wallets, windows, available_view) = wallets_of(&summary_payload, paid_tier);
+    if let Some(plan) = plan_name {
+        subscription.insert("planName".to_string(), Value::String(plan));
     }
 
     let mut document = json!({
@@ -277,8 +285,10 @@ fn upstream_message(payload: &Value) -> String {
 
 /// 摘要响应 → 钱包行 + **逐窗口读数** + 表头读数。
 ///
-/// 三份产物同源同序（上游组顺序 × 组内 bucket 顺序，**不排序**：窗口的先后本身就是
-/// 上游的表述，界面上「5 小时 / 每周」按上游给的顺序读起来最自然）：
+/// 组顺序按上游，组内窗口按 5 小时 → 每日 → 每周 → 每月 → 其它排序（同档保持
+/// 上游顺序）：上游给 bucket 的顺序不固定，按窗口从短到长排才读得出「短窗先紧
+/// 还是长窗先紧」（对齐上游 `fac7b04`）。付费档或已是双窗形态时，周窗耗尽且
+/// 上游省掉 5 小时桶的常规组会补回一条 0% 短窗（见函数体中段）：
 ///   · `wallets[]` —— 账号级明细行（悬停提示逐行列，展示串带重置时刻与中文全名）；
 ///   · `windows[]` —— 逐窗口读数（余额格按它**一格多条进度条**，与 `custom::balance`
 ///     里 OpenCode Go 的同名形状逐键对齐）。本家一次给到**两个模型组 × 两个窗口**
@@ -291,11 +301,23 @@ fn upstream_message(payload: &Value) -> String {
 ///
 /// 摘要 200 但 `groups` 缺失 / 空 / 所有 bucket 都没有比例，三份产物都为空
 /// （`wallets: []` / `windows: []` + 「无额度窗口」），不是错误。
-fn wallets_of(payload: &Value) -> (Vec<Value>, Vec<Value>, String) {
-    let mut wallets: Vec<Value> = Vec::new();
-    let mut windows: Vec<Value> = Vec::new();
-    // (剩余百分比, 展示名) —— 表头读「最紧的那个窗口」，并列取先出现的
-    let mut tightest: Option<(f64, String)> = None;
+fn wallets_of(payload: &Value, paid_tier: bool) -> (Vec<Value>, Vec<Value>, String) {
+    struct Entry {
+        rank: u8,
+        order: usize,
+        row: Value,
+        wallet: Value,
+        value: f64,
+        name: String,
+    }
+    struct GroupEntries {
+        group_name: String,
+        has_5h: bool,
+        exhausted_weekly_models: Option<Vec<String>>,
+        entries: Vec<Entry>,
+    }
+
+    let mut parsed: Vec<GroupEntries> = Vec::new();
     if let Some(groups) = payload.get("groups").and_then(Value::as_array) {
         for group in groups {
             let group_name = group_name_of(
@@ -307,8 +329,11 @@ fn wallets_of(payload: &Value) -> (Vec<Value>, Vec<Value>, String) {
             let Some(buckets) = group.get("buckets").and_then(Value::as_array) else {
                 continue;
             };
-            for bucket in buckets {
-                let Some(fraction) = bucket.get("remainingFraction").and_then(Value::as_f64) else {
+            let mut has_5h = false;
+            let mut exhausted_weekly_models: Option<Vec<String>> = None;
+            let mut entries: Vec<Entry> = Vec::new();
+            for (order, bucket) in buckets.iter().enumerate() {
+                let Some(fraction) = bucket_fraction(bucket) else {
                     continue;
                 };
                 if !fraction.is_finite() {
@@ -321,13 +346,17 @@ fn wallets_of(payload: &Value) -> (Vec<Value>, Vec<Value>, String) {
                 if !percent.is_finite() {
                     continue;
                 }
+                let code = window_code_of(bucket);
                 let window = window_name_of(bucket);
                 let display_name = if group_name.is_empty() {
                     window.clone()
                 } else {
                     format!("{group_name} · {window}")
                 };
-                let resets_at = reset_millis(bucket.get("resetTime").and_then(Value::as_str));
+                // 100% 不写重置时刻（上游同口径：满额时那个时间没有信息量）
+                let resets_at = (fraction < 1.0)
+                    .then(|| reset_millis(bucket.get("resetTime").and_then(Value::as_str)))
+                    .flatten();
                 let reading = format!("剩 {}%", percent_text(percent));
                 // ── 逐窗口项（余额格那条进度条一行的读数）──────────────
                 // `view` 只放**读数本身**、重置时刻另走 `resetsAt`：短格子里
@@ -339,17 +368,16 @@ fn wallets_of(payload: &Value) -> (Vec<Value>, Vec<Value>, String) {
                 // 「状态键由后端给、文案只在前端拼」同一条纪律）
                 let mut row = Map::new();
                 let group_models = super::argon::quota_models(payload, group, bucket);
-                row.insert("models".to_string(), json!(group_models));
+                row.insert("models".to_string(), json!(group_models.clone()));
                 row.insert("key".to_string(), Value::String(bucket_key(bucket)));
                 row.insert("label".to_string(), Value::String(display_name.clone()));
                 row.insert("group".to_string(), Value::String(group_name.clone()));
-                row.insert("window".to_string(), Value::String(window_code_of(bucket)));
+                row.insert("window".to_string(), Value::String(code.clone()));
                 row.insert("remainingPercent".to_string(), json!(percent));
                 row.insert("view".to_string(), Value::String(reading.clone()));
                 if let Some(at) = resets_at {
                     row.insert("resetsAt".to_string(), Value::from(at));
                 }
-                windows.push(Value::Object(row));
 
                 // ── 明细行（悬停提示）：展示串带上重置时刻 ─────────────
                 let mut view = reading;
@@ -358,20 +386,96 @@ fn wallets_of(payload: &Value) -> (Vec<Value>, Vec<Value>, String) {
                     view.push_str(&text);
                     view.push_str(" 重置");
                 }
-                if tightest
-                    .as_ref()
-                    .map(|(current, _)| percent < *current)
-                    .unwrap_or(true)
-                {
-                    tightest = Some((percent, display_name.clone()));
-                }
-                wallets.push(json!({
+                let wallet = json!({
                     "type": "quota_window",
-                    "displayName": display_name,
+                    "displayName": display_name.clone(),
                     "balance": Value::Null,
                     "balanceView": view,
                     "remainingPercent": percent,
-                }));
+                });
+                if code == "5h" {
+                    has_5h = true;
+                } else if code == "weekly" && percent <= 0.0 && exhausted_weekly_models.is_none() {
+                    exhausted_weekly_models = Some(group_models);
+                }
+                entries.push(Entry {
+                    rank: window_rank(&code),
+                    order,
+                    row: Value::Object(row),
+                    wallet,
+                    value: percent,
+                    name: display_name,
+                });
+            }
+            if !entries.is_empty() {
+                parsed.push(GroupEntries {
+                    group_name,
+                    has_5h,
+                    exhausted_weekly_models,
+                    entries,
+                });
+            }
+        }
+    }
+
+    // 付费档或已是双窗形态时，周窗耗尽（0%）且上游直接省掉 5 小时桶的常规模型组
+    // 补回一条 0% 短窗：否则「周额度已用完」会被读成「这个组没有短窗」，面板与
+    // 限额器都会漏掉那半截事实（上游 `fac7b04` 同口径，只补 Gemini / Claude/GPT）
+    let recover_dual_5h = paid_tier || parsed.iter().any(|group| group.has_5h);
+    if recover_dual_5h {
+        for group in &mut parsed {
+            if group.has_5h || !matches!(group.group_name.as_str(), "Gemini" | "Claude/GPT") {
+                continue;
+            }
+            let Some(models) = group.exhausted_weekly_models.take() else {
+                continue;
+            };
+            let display_name = format!("{} · 5 小时", group.group_name);
+            let reading = "剩 0%".to_string();
+            let mut row = Map::new();
+            row.insert("models".to_string(), json!(models));
+            row.insert(
+                "key".to_string(),
+                Value::String(format!("{}:5h", group.group_name)),
+            );
+            row.insert("label".to_string(), Value::String(display_name.clone()));
+            row.insert("group".to_string(), Value::String(group.group_name.clone()));
+            row.insert("window".to_string(), Value::String("5h".to_string()));
+            row.insert("remainingPercent".to_string(), json!(0.0));
+            row.insert("view".to_string(), Value::String(reading.clone()));
+            group.entries.push(Entry {
+                rank: window_rank("5h"),
+                order: usize::MAX,
+                row: Value::Object(row),
+                wallet: json!({
+                    "type": "quota_window",
+                    "displayName": display_name.clone(),
+                    "balance": Value::Null,
+                    "balanceView": reading,
+                    "remainingPercent": 0.0,
+                }),
+                value: 0.0,
+                name: display_name,
+            });
+        }
+    }
+
+    let mut wallets: Vec<Value> = Vec::new();
+    let mut windows: Vec<Value> = Vec::new();
+    // (剩余百分比, 展示名) —— 表头读「最紧的那个窗口」，并列取先出现的
+    let mut tightest: Option<(f64, String)> = None;
+    for mut group in parsed {
+        // 窗口按 5 小时 → 每日 → 每周 → 每月 → 其它排序（同一档保持上游顺序）
+        group.entries.sort_by_key(|entry| (entry.rank, entry.order));
+        for entry in group.entries {
+            windows.push(entry.row);
+            wallets.push(entry.wallet);
+            if tightest
+                .as_ref()
+                .map(|(current, _)| entry.value < *current)
+                .unwrap_or(true)
+            {
+                tightest = Some((entry.value, entry.name));
             }
         }
     }
@@ -379,6 +483,47 @@ fn wallets_of(payload: &Value) -> (Vec<Value>, Vec<Value>, String) {
         .map(|(percent, name)| format!("{name} 剩 {}%", percent_text(percent)))
         .unwrap_or_else(|| "无额度窗口".to_string());
     (wallets, windows, available_view)
+}
+
+/// 窗口排序权重：短窗在前，未知窗口排最后
+fn window_rank(code: &str) -> u8 {
+    match code.trim().to_ascii_lowercase().as_str() {
+        "5h" => 0,
+        "daily" => 1,
+        "weekly" => 2,
+        "monthly" => 3,
+        _ => 4,
+    }
+}
+
+/// 一个 bucket 的剩余比例，按上游 `fac7b04` 的三档口径：
+///   - `disabled` → 0%（停用的窗口按「没有余量」计，不能静默跳过）；
+///   - `remainingFraction`（或下划线写法）→ 原值；
+///   - 有窗口标识但既无比例也无 `remainingAmount` → 0%（上游用省略数值表达耗尽）。
+pub(super) fn bucket_fraction(bucket: &Value) -> Option<f64> {
+    if bucket.get("disabled").and_then(Value::as_bool) == Some(true) {
+        return Some(0.0);
+    }
+    if let Some(fraction) = bucket
+        .get("remainingFraction")
+        .or_else(|| bucket.get("remaining_fraction"))
+        .and_then(Value::as_f64)
+    {
+        return Some(fraction);
+    }
+    let has_amount = bucket
+        .get("remainingAmount")
+        .or_else(|| bucket.get("remaining_amount"))
+        .is_some_and(|value| !value.is_null());
+    let has_window = ["window", "bucketId", "bucket_id", "displayName", "display_name"]
+        .iter()
+        .any(|key| {
+            bucket
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        });
+    (!has_amount && has_window).then_some(0.0)
 }
 
 /// 窗口的**码**（`5h` / `weekly` / …）：给前端拼紧凑标签用的那半段 ——

@@ -9,6 +9,12 @@
 //!   ③ 同一凭据的并发续期走单飞表，只打上游一次 —— 否则两个请求各自拿到
 //!      不同的新串，后存的那个把前一个覆盖掉，账号就废了。
 //!
+//! ── 续期顺序（对齐上游 `d0712c7`）────────────────────────────
+//! 以 `ExchangeToken` **唯一先行**；上游的 DeviceProof 备用源本 fork 未实现
+//! （需要设备私钥签名与真机验证），所以不存在「先设备证明、失败再换证」的顺序。
+//! 传输错误、5xx 与 2xx 缺令牌都视为「结果未知」，不换 host / ClientID 重放，
+//! 避免重复消费已轮换的 refreshToken。
+//!
 //! 到期判定不只看临期：参考实现还加了一条"签发龄超 15 天也换"（服务端有
 //! 吊销旧凭据的风险），所以 `needs_refresh` 的两个条件都要传（见 `credentials.rs`）。
 
@@ -247,6 +253,14 @@ pub async fn refresh_once(
             // 日志只写了 host 与上游原文，"归属不对"这个原因看不出来
             let label = format!("{url}（ClientID {client_id}）");
             match outcome {
+                Ok(reply) if reply.status >= 500 => {
+                    // 5xx 时上游可能已经消费并轮换了 refreshToken，结果未知：
+                    // 换 host / ClientID 重放会重复消费同一枚令牌，直接交回错误
+                    return Err(GatewayError::with_status(
+                        i32::from(reply.status),
+                        format!("Trae 续期上游错误：{}", trim(&reply.body)),
+                    ));
+                }
                 Ok(reply) if reply.status >= 400 => {
                     if attribution_reject(reply.status, &reply.body) {
                         wrong_attribution = true;
@@ -269,9 +283,17 @@ pub async fn refresh_once(
                         next.auth_client_id = if acknowledged.is_empty() { client_id } else { acknowledged };
                         return Ok(next);
                     }
-                    Err(reason) => errors.push(format!("{label} => {reason}")),
+                    // 2xx 但拿不到令牌：同属结果未知，不换 host 重放
+                    Err(reason) => {
+                        return Err(GatewayError::with_status(
+                            502,
+                            format!("{label} => {reason}"),
+                        ));
+                    }
                 },
-                Err(error) => errors.push(format!("{label} => {}", error.message)),
+                // 传输层失败（连接中断 / 超时）：请求可能已到达上游并轮换令牌，
+                // 同样不重放
+                Err(error) => return Err(error),
             }
         }
         // 换下一把归属的唯一理由：上游明说"这枚令牌不属于你报的这个 client"。

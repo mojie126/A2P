@@ -94,7 +94,7 @@ fn quota_info(summary: &Value) -> Value {
                 .filter(move |bucket| is_quota_bucket(group, bucket))
         })
         .filter_map(|bucket| {
-            let fraction = bucket.get("remainingFraction")?.as_f64()?;
+            let fraction = super::balance::bucket_fraction(bucket)?;
             (fraction.is_finite() && (0.0..=1.0).contains(&fraction)).then_some((fraction, bucket))
         })
         .min_by(|(left, _), (right, _)| left.total_cmp(right));

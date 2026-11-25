@@ -50,11 +50,16 @@ pub struct Credentials {
 impl Credentials {
     /// JWT 是否已过期或临期（`exp` 判不出 → false）。
     pub fn is_expiring(&self) -> bool {
+        self.is_expiring_within(0)
+    }
+
+    /// 带最小提前量的临期判定（与自带窗口取较大值）
+    pub fn is_expiring_within(&self, lead_ms: i64) -> bool {
         if self.expires_at <= 0 {
             return false;
         }
         let now = crate::http::now_ms() / 1000;
-        self.expires_at - now < EXPIRY_WINDOW_MS / 1000
+        self.expires_at - now < EXPIRY_WINDOW_MS.max(lead_ms) / 1000
     }
 
     /// 脱敏尾段（展示用）。

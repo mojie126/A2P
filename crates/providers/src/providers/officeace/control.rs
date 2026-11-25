@@ -36,10 +36,11 @@ fn can_refresh(secret: &Value) -> bool {
         && secret.get("dpopKeyPair").is_some_and(Value::is_object)
 }
 
-pub fn credentials_expiring(record: &Value) -> bool {
+/// 带最小提前量的临期判定（与自带窗口取较大值）
+pub fn credentials_expiring_within(record: &Value, lead_ms: i64) -> bool {
     can_refresh(record)
         && credentials::from_record(Some(record))
-            .is_ok_and(|credential| credential.control_plane_expiring())
+            .is_ok_and(|credential| credential.control_plane_expiring_within(lead_ms))
 }
 
 pub async fn credential_of(

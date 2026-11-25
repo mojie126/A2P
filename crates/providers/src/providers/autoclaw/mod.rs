@@ -57,6 +57,7 @@
 
 pub mod balance;
 pub mod callback_server;
+pub mod campaigns;
 pub mod catalog;
 pub mod checkin;
 pub mod credentials;
@@ -167,8 +168,9 @@ impl Provider for AutoClawProvider {
             usage: true,
             // 每日签到（`autoclaw-task-complete` 的 `daily_signin`）
             checkin: true,
-            // 活动福利是"登录即发"，没有领取按钮 —— 与内置版同一结论
-            claims: false,
+            // 活动福利：登录活跃 / Weekly Perks、客户端任务、新手任务与兑换码
+            // 都提供领取入口（实现见 `campaigns`）
+            claims: true,
             // 网页登录随实现搬进插件：国际版 OAuth（`web_login` + 登记端口
             // `callback_server`），国内版没有网页授权（上游 OAuth 开关是关的）
             web_login: region == Region::Intl,
@@ -410,7 +412,7 @@ impl Provider for AutoClawProvider {
             if !credentials.can_refresh() {
                 return Ok(false);
             }
-            Ok(credentials.is_expiring()
+            Ok(credentials.is_expiring_within(ctx.expiring_lead())
                 || credentials::hourly_forced_refresh_due(account, logging::now_ms()))
         })
     }
@@ -485,6 +487,34 @@ impl Provider for AutoClawProvider {
                 .await
                 .map_err(GatewayError::into_control_message)?;
             Ok(checkin_report_of(&claim))
+        })
+    }
+
+    /// 活动福利预览（登录活跃 / Weekly Perks、客户端任务、新手任务）
+    fn claim_status<'a>(
+        &'a self,
+        ctx: &'a PluginCtx,
+        account: &'a str,
+        _refresh: bool,
+    ) -> SendFuture<'a, Value> {
+        Box::pin(async move {
+            campaigns::preview(ctx, self.region, account)
+                .await
+                .map_err(GatewayError::into_control_message)
+        })
+    }
+
+    /// 按项领取活动福利
+    fn claim<'a>(
+        &'a self,
+        ctx: &'a PluginCtx,
+        account: &'a str,
+        campaign: &'a str,
+    ) -> SendFuture<'a, Value> {
+        Box::pin(async move {
+            campaigns::claim(ctx, self.region, account, campaign)
+                .await
+                .map_err(GatewayError::into_control_message)
         })
     }
 
@@ -570,8 +600,8 @@ impl Provider for AutoClawProvider {
     /// 再拆出来（见 `login.rs` 的模块头）。
     fn admin_action<'a>(
         &'a self,
-        _ctx: &'a PluginCtx,
-        _account: &'a str,
+        ctx: &'a PluginCtx,
+        account: &'a str,
         action: &'a str,
         payload: &'a Value,
     ) -> SendFuture<'a, Value> {
@@ -643,9 +673,17 @@ impl Provider for AutoClawProvider {
                     web_login::submit_callback(flow, url).await?;
                     Ok(serde_json::json!({ "accepted": true }))
                 }
+                // 活动福利预览与兑换码（领取走协议里的 `claim`）
+                "claim.status" | "activity.status" => campaigns::preview(ctx, region, account)
+                    .await
+                    .map_err(GatewayError::into_control_message),
+                "benefits.redeem" => campaigns::redeem(ctx, region, account, payload)
+                    .await
+                    .map_err(GatewayError::into_control_message),
                 other => Err(format!(
                     "AutoClaw 不认识管理动作「{other}」（可用：login.sms-send / login.sms-verify / \
-                     login.oauth-config / login.oauth-start / login.oauth-callback）"
+                     login.oauth-config / login.oauth-start / login.oauth-callback / \
+                     claim.status / benefits.redeem）"
                 )),
             }
         })
@@ -701,7 +739,7 @@ async fn resolve_credentials(
 ///   3. **刷新了也要比较-再写**：`store::save` 在同一把账号锁内确认记录里仍是
 ///      刷新前那份凭证才写入。期间用户重导入 / 删除 / 换号、或另一轮刷新先
 ///      落地时，旧结果不得覆盖新凭证。
-async fn persist_refresh(
+pub(super) async fn persist_refresh(
     ctx: &PluginCtx,
     previous: &AutoClawCredentials,
     refreshed: &AutoClawCredentials,

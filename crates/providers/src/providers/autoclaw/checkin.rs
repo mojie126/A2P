@@ -96,7 +96,7 @@ const TASK_LIST_PATH: &str = "/autoclaw-proxy/proxy/autoclaw-task-list";
 /// 「登录」接口路径（客户端启动同款：`withWebInfo` 的 user-info）。
 ///
 /// 活动福利的发放钩子挂在它上面（见模块头「为什么触发动作是 user-info」）。
-const USER_INFO_PATH: &str = "/userapi/v1/user-info";
+pub(super) const USER_INFO_PATH: &str = "/userapi/v1/user-info";
 
 /// AutoClaw 账号的每日签到（**含活动福利触发与附加**）。
 ///

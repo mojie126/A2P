@@ -270,7 +270,7 @@ impl Provider for DumateProvider {
             if credentials.cookie.is_empty() {
                 return Ok(false);
             }
-            Ok(client::token_expiring(&stored.id, &credentials))
+            Ok(client::token_expiring_within(&stored.id, &credentials, ctx.expiring_lead()))
         })
     }
 
