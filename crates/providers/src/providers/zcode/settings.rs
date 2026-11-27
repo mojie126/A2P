@@ -11,7 +11,24 @@ fn translated(values: [&str; 6]) -> Value {
 
 pub fn group() -> Group { Group::new("ZCode") }
 
+/// 「参与每日签到」开关的键名（`plugin.zcode.dailyCheckin`）。
+///
+/// 缺省（没有这一格）= 参与，与网关 `auto_checkin::daily_checkin_enabled`
+/// 的读取口径一致，两个地区共用同一份设置
+pub const SETTING_DAILY_CHECKIN: &str = "dailyCheckin";
+
 pub fn schema() -> Schema {
+    let mut checkin = Field::new(SETTING_DAILY_CHECKIN, translated([
+        "参与每日签到", "Daily check-in", "毎日チェックイン", "매일 출석", "Check-in diário", "參與每日簽到",
+    ]), "boolean", json!(true));
+    checkin.description = translated([
+        "关闭后不再自动领取每日赠送套餐，活动套餐仍可在活动福利里手动领取。国内版与国际版共用此开关。",
+        "When off, daily gift plans are no longer claimed automatically; you can still claim offer plans manually. Shared by China and Global editions.",
+        "オフにすると毎日の特典プランを自動受け取りしません。特典は特典一覧から手動で受け取れます。中国版と国際版で共有します。",
+        "끄면 매일 증정 요금제를 자동으로 받지 않습니다. 혜택 목록에서 직접 받을 수 있습니다. 중국판과 국제판이 공유합니다.",
+        "Quando desativado, os planos de brinde diários não são resgatados automaticamente; ainda é possível resgatá-los manualmente nas ofertas. Compartilhado pelas edições China e Global.",
+        "關閉後不再自動領取每日贈送方案，活動方案仍可在活動福利裡手動領取。國內版與國際版共用此開關。",
+    ]);
     let mut field = Field::new(claim::SETTING_APP_VERSION, translated([
         "客户端版本号", "Client version", "クライアントのバージョン", "클라이언트 버전", "Versão do cliente", "用戶端版本號",
     ]), "string", json!(claim::DEFAULT_APP_VERSION));
@@ -29,16 +46,16 @@ pub fn schema() -> Schema {
     ]);
     let mut schema = Schema::new(translated([
         "活动与套餐", "Offers and plans", "特典とプラン", "혜택 및 요금제", "Ofertas e planos", "活動與方案",
-    ]), vec![field]);
+    ]), vec![checkin, field]);
     schema.storage_provider = Some(claim::APP_VERSION_SETTING_OWNER.into());
     schema.runtime_overrides = true;
     schema.description = translated([
-        "用于活动查询与领取，不影响套餐池推理使用的版本。国内版与国际版共用此项；环境变量 ZCODE_APP_VERSION 优先于手动设置。",
-        "Used to discover and claim offers, without changing the Start Plan inference version. Shared by China and Global editions; ZCODE_APP_VERSION overrides manual settings.",
-        "特典の検索と受け取りに使い、Start Plan 推論のバージョンには影響しません。中国版と国際版で共有し、環境変数 ZCODE_APP_VERSION が手動設定より優先されます。",
-        "혜택 조회와 수령에 사용되며 Start Plan 추론 버전에는 영향을 주지 않습니다. 중국판과 국제판이 공유하며 환경 변수 ZCODE_APP_VERSION이 수동 설정보다 우선합니다.",
-        "Usada para consultar e resgatar ofertas, sem alterar a versão de inferência Start Plan. Compartilhada pelas edições China e Global; ZCODE_APP_VERSION tem prioridade sobre as configurações manuais.",
-        "用於活動查詢與領取，不影響方案池推理使用的版本。國內版與國際版共用此項；環境變數 ZCODE_APP_VERSION 優先於手動設定。",
+        "签到开关与活动查询使用；客户端版本号不影响套餐池推理使用的版本。国内版与国际版共用这两项；环境变量 ZCODE_APP_VERSION 优先于手动设置。",
+        "Used for check-in and offer discovery; the client version does not change the Start Plan inference version. Both settings are shared by China and Global editions; ZCODE_APP_VERSION overrides manual settings.",
+        "チェックインと特典の検索に使います。クライアントのバージョンは Start Plan 推論のバージョンには影響しません。中国版と国際版で共有し、環境変数 ZCODE_APP_VERSION が手動設定より優先されます。",
+        "출석과 혜택 조회에 사용되며 클라이언트 버전은 Start Plan 추론 버전에 영향을 주지 않습니다. 중국판과 국제판이 공유하며 환경 변수 ZCODE_APP_VERSION이 수동 설정보다 우선합니다.",
+        "Usados para check-in e descoberta de ofertas; a versão do cliente não altera a versão de inferência Start Plan. Compartilhados pelas edições China e Global; ZCODE_APP_VERSION tem prioridade sobre as configurações manuais.",
+        "簽到開關與活動查詢使用；用戶端版本號不影響方案池推理使用的版本。國內版與國際版共用這兩項；環境變數 ZCODE_APP_VERSION 優先於手動設定。",
     ]);
     schema
 }

@@ -179,8 +179,9 @@ impl Provider for ZcodeProvider {
                 model_refresh: false,
                 // 套餐余额（billing + 监控两条通道）
                 usage: true,
-                // 每日赠送套餐活动已下架，不再参与每日签到（`checkin` 模块保留领取实现，供偶发活动使用）
-                checkin: false,
+                // 每日赠送套餐活动恢复，参与每日签到（运行期开关见
+                // 设置项 `dailyCheckin`；关闭后网关不再把本家列入签到清单）
+                checkin: true,
                 claims: true,
                 // 服务端中介的 CLI 轮询：授权地址由上游给、回调在上游域名终结，
                 // 因此插件声明「轮询型」由网关发起并轮询（见 `login.rs`）
@@ -239,16 +240,15 @@ impl Provider for ZcodeProvider {
                 expiry: vec!["expiresAt".to_string()],
                 ..Default::default()
             })
-            // 签到能力申报：官方每日赠送套餐活动已下架，不再参与每日签到
-            // （`daily: false`、`modes` 为空），仅保留 `plans: true` 让签到中心的
-            // 「活动福利」卡片继续按活动展示偶发福利
+            // 签到能力申报：每日赠送套餐活动恢复，参与每日签到，
+            // 同时保留 `plans: true` 让签到中心的「活动福利」卡片继续展示活动套餐
             .with_checkin(proto::CheckinInfo {
                 description: Some(format!(
-                    "偶尔开放赠送套餐活动（每日签到已下架，有活动时可在活动福利查询并领取）· {}",
+                    "每日领取赠送套餐（活动期按日下发），活动福利里可查询并手动领取 · {}",
                     self.region.label()
                 )),
-                modes: Vec::new(),
-                daily: false,
+                modes: vec![proto::CheckinMode::Checkin],
+                daily: true,
                 plans: true,
                 ..Default::default()
             })
